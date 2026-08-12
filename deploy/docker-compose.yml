@@ -4,9 +4,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     ports:
-      - "4224:4224"
+      - "127.0.0.1:4224:4224"
     environment:
-      - DBX_PASSWORD=changeme
+      - DBX_PASSWORD=P@$$w0RDDBX
       # Uncomment when publishing DBX under a reverse-proxy subpath, e.g. https://example.com/dbx/
       # - DBX_PUBLIC_BASE_PATH=/dbx
     volumes:
