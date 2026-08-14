@@ -18,6 +18,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useUserStore } from "@/stores/userStore";
+import { clearAllBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
@@ -2323,7 +2325,15 @@ async function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-function onLoginSuccess() {
+function onLoginSuccess(user?: any) {
+  if (user) {
+    const userStore = useUserStore();
+    // If a different user is logging in, clear previous user's browser state
+    if (userStore.currentUser && userStore.currentUser.id !== user.id) {
+      clearAllBrowserAppState().catch(() => {});
+    }
+    userStore.currentUser = user;
+  }
   authenticated.value = true;
   setupRequired.value = false;
   needsAuth.value = true;
@@ -2474,6 +2484,10 @@ onMounted(async () => {
       needsAuth.value = data.required;
       authenticated.value = data.authenticated;
       setupRequired.value = data.setup_required;
+      if (data.user) {
+        const userStore = useUserStore();
+        userStore.currentUser = data.user;
+      }
     } catch {
       /* server unreachable */
     }

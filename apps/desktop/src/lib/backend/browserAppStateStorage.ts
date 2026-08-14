@@ -68,3 +68,31 @@ export async function saveBrowserAppState(key: string, value: unknown): Promise<
   if (result !== null) return;
   safeLocalStorageSet(fallbackKey(key), JSON.stringify(value));
 }
+
+export async function clearAllBrowserAppState(): Promise<void> {
+  // Clear IndexedDB store
+  const db = await openDb();
+  if (db) {
+    try {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).clear();
+      await new Promise<void>((resolve) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch {
+      // ignore
+    }
+  }
+  // Clear localStorage fallback keys
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(LOCAL_STORAGE_PREFIX)) {
+      localStorage.removeItem(key);
+    }
+  }
+  // Also clear editor settings and other known localStorage keys
+  for (const key of ["dbx-editor-settings", "dbx-app-state:open_tabs", "dbx-app-state:editor_settings"]) {
+    localStorage.removeItem(key);
+  }
+}

@@ -15,6 +15,8 @@ export default withEnglishFallback({
     newPassword: "输入新密码",
     confirmPassword: "确认密码",
     enterPassword: "请输入访问密码",
+    username: "帐号",
+    newUsername: "管理员帐号",
     passwordMismatch: "两次输入的密码不一致",
     setPassword: "设置密码",
     login: "登录",

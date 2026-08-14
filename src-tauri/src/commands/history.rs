@@ -6,7 +6,7 @@ pub use dbx_core::history::{HistoryConnectionOption, HistoryEntry, HistorySearch
 
 #[tauri::command]
 pub async fn save_history(state: State<'_, Arc<AppState>>, entry: HistoryEntry) -> Result<(), String> {
-    state.storage.save_history_entry(&entry).await
+    state.storage.save_history_entry(&entry, "").await
 }
 
 #[tauri::command]

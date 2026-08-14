@@ -1,4 +1,4 @@
-export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
+export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "admin" | "ldap" | "backup-restore" | "audit" | "about";
 
 export interface SettingsSearchContext {
   isWeb: boolean;

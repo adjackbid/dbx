@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree, LogOut } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -11,6 +11,9 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useUserStore } from "@/stores/userStore";
+import { webPath } from "@/lib/common/webPath";
+import { clearAllBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
 const GithubIcon = {
@@ -62,8 +65,22 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const userStore = useUserStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
+
+async function handleLogout() {
+  try {
+    await userStore.logout();
+  } catch {
+    // ignore
+  }
+  // Clear all browser-local state (open tabs, editor settings, etc.)
+  // so the next user starts with a clean slate
+  await clearAllBrowserAppState();
+  // Force full page reload to clear all in-memory Vue state
+  window.location.href = webPath("/login");
+}
 const checkingUpdates = computed(() => props.checkingUpdates);
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
@@ -682,6 +699,27 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : t("settings.title") }}</TooltipContent>
     </Tooltip>
+
+    <!-- User menu + Logout (web mode only) -->
+    <div v-if="userStore.isAuthenticated" class="flex items-center gap-1 ml-1 pl-2 border-l border-border/60">
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <div class="flex items-center gap-1.5 px-2 h-8 rounded-md hover:bg-muted cursor-default text-sm">
+            <span class="font-medium">{{ userStore.currentUser?.displayName || userStore.currentUser?.username }}</span>
+            <span v-if="userStore.isAdmin" class="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">Admin</span>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent>{{ userStore.currentUser?.username }} ({{ userStore.currentUser?.authSource }})</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="handleLogout">
+            <LogOut class="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Logout</TooltipContent>
+      </Tooltip>
+    </div>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>

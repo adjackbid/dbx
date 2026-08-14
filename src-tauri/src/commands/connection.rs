@@ -423,7 +423,7 @@ mod tests {
 
         persist_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
 
-        let saved = state.storage.load_connections().await.unwrap();
+        let saved = state.storage.load_all_connections().await.unwrap();
         let updated = saved.iter().find(|config| config.id == mongo.id).unwrap();
         assert_eq!(updated.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(updated.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
@@ -610,7 +610,7 @@ async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             )?;
         }
     }
-    state.storage.save_connections(configs).await?;
+    state.storage.save_connections(configs, "").await?;
     let sync = sync_connection_configs(state, configs).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
@@ -703,7 +703,7 @@ pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<Con
 
 async fn load_connection_configs(state: &AppState) -> Result<Vec<ConnectionConfig>, String> {
     let configs: Vec<ConnectionConfig> =
-        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
+        state.storage.load_all_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
     let sync = sync_connection_configs(state, &configs).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
@@ -1628,7 +1628,7 @@ pub async fn save_connection_database_info(
     connection_id: String,
     database_info: Option<DatabaseConnectionInfo>,
 ) -> Result<(), String> {
-    state.save_connection_database_info(&connection_id, database_info).await
+    state.save_connection_database_info(&connection_id, database_info, "").await
 }
 
 /// Check whether a connection has read-only protection enabled.

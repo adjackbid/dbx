@@ -288,11 +288,12 @@ pub async fn connected_database_info(
 
 pub async fn save_connection_database_info(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveConnectionDatabaseInfoRequest>,
 ) -> Result<Json<()>, AppError> {
     state
         .app
-        .save_connection_database_info(&body.connection_id, body.database_info)
+        .save_connection_database_info(&body.connection_id, body.database_info, &session.user_id)
         .await
         .map(|_| Json(()))
         .map_err(AppError::from)
@@ -383,6 +384,7 @@ pub async fn close_database_connection(
 
 pub async fn save_connections(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
     for config in &body.configs {
@@ -395,7 +397,7 @@ pub async fn save_connections(
             .map_err(AppError::from)?;
         }
     }
-    state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
+    state.app.storage.save_connections(&body.configs, &session.user_id).await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &body.configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
@@ -405,19 +407,23 @@ pub async fn save_connections(
 
 pub async fn mcp_add_connection(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
-    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
+    let saved =
+        state.app.storage.add_connection_for_mcp(body.config, &session.user_id).await.map_err(AppError::from)?;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))
 }
 
 pub async fn mcp_remove_connection(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<McpRemoveConnectionRequest>,
 ) -> Result<Json<bool>, AppError> {
     let connection_id = body.connection_id;
-    let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError::from)?;
+    let removed =
+        state.app.storage.remove_connection_for_mcp(&connection_id, &session.user_id).await.map_err(AppError::from)?;
     if removed {
         state.app.configs.write().await.remove(&connection_id);
         state.app.remove_connection_pools_detached(&connection_id).await;
@@ -428,8 +434,11 @@ pub async fn mcp_remove_connection(
     Ok(Json(removed))
 }
 
-pub async fn load_connections(State(state): State<Arc<WebState>>) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
-    let configs = state.app.storage.load_connections().await.map_err(AppError::from)?;
+pub async fn load_connections(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
+    let configs = state.app.storage.load_connections(&session.user_id).await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;

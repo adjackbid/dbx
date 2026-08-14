@@ -38,16 +38,20 @@ pub struct DecryptConfigRequest {
     pub passphrase: String,
 }
 
-pub async fn load_pinned_tree_node_ids(State(state): State<Arc<WebState>>) -> Result<Json<Vec<String>>, AppError> {
-    let ids = state.app.storage.load_pinned_tree_node_ids().await.map_err(AppError::from)?;
+pub async fn load_pinned_tree_node_ids(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let ids = state.app.storage.load_pinned_tree_node_ids_for_user(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(ids))
 }
 
 pub async fn save_pinned_tree_node_ids(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SavePinnedTreeNodeIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_pinned_tree_node_ids(&body.ids).await.map_err(AppError::from)?;
+    state.app.storage.save_pinned_tree_node_ids_for_user(&session.user_id, &body.ids).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 

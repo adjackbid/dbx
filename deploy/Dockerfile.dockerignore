@@ -1,6 +1,9 @@
 target/
+**/target/
 node_modules/
+**/node_modules/
 dist/
+**/dist/
 src-tauri/target/
 .git/
 .github/
@@ -10,3 +13,8 @@ src-tauri/target/
 .env
 .env.*
 tmp/
+docs/
+tests/
+skills/
+agents/
+.cargo/

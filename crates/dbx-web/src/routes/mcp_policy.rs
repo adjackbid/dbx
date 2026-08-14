@@ -248,7 +248,7 @@ async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<C
     state
         .app
         .storage
-        .load_connections()
+        .load_all_connections()
         .await
         .map_err(AppError::from)?
         .into_iter()

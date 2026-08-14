@@ -1,0 +1,24 @@
+你的 C# 設定 → DBX LDAP 設定對照：
+
+┌──────────────────────────┬───────────────┬─────────────────────────────┐
+│ C# 設定                  │ DBX LDAP 欄位 │ 值                          │
+├──────────────────────────┼───────────────┼─────────────────────────────┤
+│ LDAP://192.168.36.242    │ Server URL    │ ldap://192.168.36.242:389   │
+├──────────────────────────┼───────────────┼─────────────────────────────┤
+│ /DC=txc,DC=com,DC=tw     │ User Base DN  │ DC=txc,DC=com,DC=tw         │
+├──────────────────────────┼───────────────┼─────────────────────────────┤
+│ (SAMAccountName=account) │ Search Filter │ (SAMAccountName={username}) │
+└──────────────────────────┴───────────────┴─────────────────────────────┘
+
+設定步驟：
+
+1. 勾選 Enable LDAP login
+2. Server URL =  ldap://192.168.36.242:389 
+3. Service Account DN = 留空（不需要）
+4. Service Account Password = 留空
+5. User Base DN =  DC=txc,DC=com,DC=tw 
+6. Search Filter =  (SAMAccountName={username}) （已改為預設值）
+7. 其他保持預設
+8. 點 Save Settings
+
+預設 filter 已從  (uid={username})  改為  (SAMAccountName={username})  以符合 AD 環境。

@@ -316,7 +316,7 @@ impl WebBackend {
 impl LocalBackend {
     pub async fn open(path: &Path) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
-        let configs = storage.load_connections().await?;
+        let configs = storage.load_all_connections().await?;
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
         let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
         let plugin_dir = local_plugin_dir(&desktop_settings, &data_dir);
@@ -396,7 +396,7 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
-        let configs = self.state.storage.load_connections().await?;
+        let configs = self.state.storage.load_all_connections().await?;
         // Connections created/modified/deleted in the DBX desktop UI after this process started
         // only update the shared SQLite storage; the AppState.configs in-memory cache is not kept
         // in sync. Sync the latest config into the runtime cache after each read, otherwise DB
@@ -451,13 +451,13 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
-        let config = self.state.storage.add_connection_for_mcp(config).await?;
+        let config = self.state.storage.add_connection_for_mcp(config, "").await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
         Ok(config)
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
-        let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
+        let removed = self.state.storage.remove_connection_for_mcp(connection_id, "").await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
         }

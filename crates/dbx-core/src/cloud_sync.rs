@@ -246,7 +246,7 @@ pub async fn build_sync_snapshot(
     editor_settings: Option<serde_json::Value>,
     secrets_passphrase: Option<&str>,
 ) -> Result<SyncSnapshot, String> {
-    let mut connections = storage.load_connections().await?;
+    let mut connections = storage.load_all_connections().await?;
     let mut tunnel_profiles = storage.load_tunnel_profiles().await?;
     let encrypted_secrets = match normalized_passphrase(secrets_passphrase) {
         Some(passphrase) => Some(encrypt_sensitive_payload(
@@ -328,7 +328,7 @@ pub async fn apply_sync_snapshot(
         scrub_connection_secrets(config);
     }
 
-    storage.save_connection_metadata_preserving_secrets(&connections).await?;
+    storage.save_connection_metadata_preserving_secrets(&connections, "").await?;
     if let Some(profiles) = &snapshot.tunnel_profiles {
         storage.save_tunnel_profiles_preserving_secrets(profiles).await?;
     }
@@ -884,7 +884,7 @@ async fn preserve_local_mqtt_subscriptions_for_legacy_snapshot(
     storage: &Storage,
     connections: &mut [ConnectionConfig],
 ) -> Result<(), String> {
-    let local_connections = storage.load_connections().await?;
+    let local_connections = storage.load_all_connections().await?;
     for config in connections.iter_mut().filter(|config| config.db_type == DatabaseType::Mqtt) {
         let Some(local_config) = local_connections.iter().find(|local| local.id == config.id) else {
             continue;
@@ -1181,7 +1181,7 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
         {
             continue;
         }
-        storage.set_secret(&secret.connection_id, &secret.key, &secret.secret).await?;
+        storage.set_secret(&secret.connection_id, &secret.key, &secret.secret, "").await?;
     }
     if let Some(configs) = &payload.ai_configs {
         // New format: save directly (empty = all configs were deleted)
@@ -1208,19 +1208,21 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
 async fn clear_connection_secrets(storage: &Storage, connections: &[ConnectionConfig]) -> Result<(), String> {
     for config in connections {
         for key in SECRET_KEYS {
-            storage.delete_secret(&config.id, key).await?;
+            storage.delete_secret(&config.id, key, "").await?;
         }
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
                 TransportLayerConfig::Ssh(_) => {
-                    storage.delete_secret(&config.id, &transport_layer_ssh_password_key(index, layer)).await?;
-                    storage.delete_secret(&config.id, &transport_layer_ssh_key_passphrase_key(index, layer)).await?;
+                    storage.delete_secret(&config.id, &transport_layer_ssh_password_key(index, layer), "").await?;
+                    storage
+                        .delete_secret(&config.id, &transport_layer_ssh_key_passphrase_key(index, layer), "")
+                        .await?;
                 }
                 TransportLayerConfig::Proxy(_) => {
-                    storage.delete_secret(&config.id, &transport_layer_proxy_password_key(index, layer)).await?;
+                    storage.delete_secret(&config.id, &transport_layer_proxy_password_key(index, layer), "").await?;
                 }
                 TransportLayerConfig::HttpTunnel(_) => {
-                    storage.delete_secret(&config.id, &transport_layer_http_tunnel_token_key(index, layer)).await?;
+                    storage.delete_secret(&config.id, &transport_layer_http_tunnel_token_key(index, layer), "").await?;
                 }
             }
         }
@@ -2031,7 +2033,7 @@ mod tests {
     #[tokio::test]
     async fn encrypted_snippet_snapshot_hides_and_restores_the_full_snapshot() {
         let storage = Storage::open(&temp_db_path("encrypted-snippet-snapshot")).await.unwrap();
-        storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
+        storage.save_connections(&[postgres_connection("pg", "db-secret")], "").await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
 
         let encrypted = encrypt_snippet_snapshot(&snapshot, "sync-pass").unwrap();
@@ -2049,7 +2051,7 @@ mod tests {
     #[tokio::test]
     async fn encrypted_snippet_can_exclude_secrets_and_keep_local_credentials_on_restore() {
         let source = Storage::open(&temp_db_path("snippet-without-secrets-source")).await.unwrap();
-        source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
+        source.save_connections(&[postgres_connection("pg", "remote-secret")], "").await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
         assert!(snapshot.encrypted_secrets.is_none());
 
@@ -2057,7 +2059,7 @@ mod tests {
         let restored =
             parse_snippet_snapshot(&serde_json::to_string(&encrypted).unwrap(), Some("snippet-password")).unwrap();
         let target = Storage::open(&temp_db_path("snippet-without-secrets-target")).await.unwrap();
-        target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
+        target.save_connections(&[postgres_connection("pg", "local-secret")], "").await.unwrap();
 
         let summary = apply_sync_snapshot(
             &target,
@@ -2068,13 +2070,13 @@ mod tests {
         .unwrap();
         assert!(!summary.encrypted_secrets_present);
         assert!(!summary.secrets_applied);
-        assert_eq!(target.load_connections().await.unwrap()[0].password, "local-secret");
+        assert_eq!(target.load_all_connections().await.unwrap()[0].password, "local-secret");
     }
 
     #[tokio::test]
     async fn skipping_snippet_secret_restore_keeps_local_credentials() {
         let source = Storage::open(&temp_db_path("snippet-skip-secrets-source")).await.unwrap();
-        source.save_connections(&[postgres_connection("pg", "remote-secret")]).await.unwrap();
+        source.save_connections(&[postgres_connection("pg", "remote-secret")], "").await.unwrap();
         let snapshot = build_sync_snapshot(&source, "test-version", None, Some("secrets-password")).await.unwrap();
         assert!(snapshot.encrypted_secrets.is_some());
 
@@ -2082,7 +2084,7 @@ mod tests {
         let restored =
             parse_snippet_snapshot(&serde_json::to_string(&encrypted).unwrap(), Some("snippet-password")).unwrap();
         let target = Storage::open(&temp_db_path("snippet-skip-secrets-target")).await.unwrap();
-        target.save_connections(&[postgres_connection("pg", "local-secret")]).await.unwrap();
+        target.save_connections(&[postgres_connection("pg", "local-secret")], "").await.unwrap();
 
         let summary = apply_sync_snapshot(
             &target,
@@ -2093,7 +2095,7 @@ mod tests {
         .unwrap();
         assert!(summary.encrypted_secrets_present);
         assert!(!summary.secrets_applied);
-        assert_eq!(target.load_connections().await.unwrap()[0].password, "local-secret");
+        assert_eq!(target.load_all_connections().await.unwrap()[0].password, "local-secret");
     }
 
     #[tokio::test]
@@ -2255,7 +2257,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_snippet_migration_refuses_unverifiable_encrypted_secrets() {
         let storage = Storage::open(&temp_db_path("legacy-snippet-migration-secrets")).await.unwrap();
-        storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
+        storage.save_connections(&[postgres_connection("pg", "db-secret")], "").await.unwrap();
         let remote_snapshot = build_sync_snapshot(&storage, "remote-version", None, Some("remote-pass")).await.unwrap();
         let content = serde_json::to_string(&remote_snapshot).unwrap();
 
@@ -2375,7 +2377,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sync_passphrase_encrypts_snapshot_secrets_without_exposing_connection_passwords() {
         let storage = Storage::open(&temp_db_path("saved-sync-snapshot")).await.unwrap();
-        storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
+        storage.save_connections(&[postgres_connection("pg", "db-secret")], "").await.unwrap();
 
         let plain_snapshot =
             build_sync_snapshot_with_saved_secrets(&storage, "test-version", None, None).await.unwrap();
@@ -2397,7 +2399,7 @@ mod tests {
     #[tokio::test]
     async fn saved_sync_passphrase_encrypts_nacos_auth_password_without_exposing_it() {
         let storage = Storage::open(&temp_db_path("saved-sync-nacos-snapshot")).await.unwrap();
-        storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
+        storage.save_connections(&[nacos_connection("nacos", "nacos-secret")], "").await.unwrap();
 
         save_webdav_sync_secrets_preference(&storage, true, Some("sync-pass")).await.unwrap();
         let encrypted_snapshot =

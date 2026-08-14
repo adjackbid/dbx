@@ -257,13 +257,13 @@ async fn main() {
         public_base_path: public_base_path.clone(),
         password_disabled,
         password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        login_rate_limit: tokio::sync::Mutex::new(HashMap::new()),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
@@ -278,6 +278,21 @@ async fn main() {
         .route("/auth/setup", post(auth::setup))
         .route("/auth/change-password", post(auth::change_password))
         .route("/auth/logout", post(auth::logout))
+        // User management (Admin only)
+        .route("/users", get(auth::list_users).post(auth::create_user_api))
+        .route("/users/{id}", axum::routing::put(auth::update_user_api).delete(auth::delete_user_api))
+        .route("/users/{id}/reset-password", post(auth::reset_user_password_api))
+        // LDAP settings (Admin only)
+        .route("/ldap/config", get(routes::admin::get_ldap_config).put(routes::admin::update_ldap_config))
+        .route("/ldap/test/connection", post(routes::admin::test_ldap_connection_api))
+        .route("/ldap/test/search", post(routes::admin::test_ldap_search_api))
+        .route("/ldap/test/bind", post(routes::admin::test_ldap_bind_api))
+        // Backup export/import
+        .route("/backup/export", post(routes::admin::export_backup_api))
+        .route("/backup/import", post(routes::admin::import_backup_api))
+        // Admin audit logs & SQL history
+        .route("/admin/audit-logs", get(routes::admin::get_audit_logs))
+        .route("/admin/sql-history", get(routes::admin::get_sql_history_all))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))

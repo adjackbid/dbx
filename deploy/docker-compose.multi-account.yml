@@ -1,0 +1,44 @@
+# Multi-account test instance of DBX
+#
+# This compose file creates an INDEPENDENT container for testing the
+# multi-account login feature. It uses a different port (4230) and a
+# separate named volume so data never overlaps with the production
+# instance running on port 4224.
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.multi-account.yml up --build -d
+#
+# First-run setup:
+#   Open http://localhost:4230 in your browser and follow the on-screen
+#   instructions to create the first admin account.
+#
+# Tear down (including data):
+#   docker compose -f deploy/docker-compose.multi-account.yml down -v
+
+name: dbx-multi-account
+
+services:
+  dbx-multi-account:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: dbx-multi-account
+    ports:
+      - "127.0.0.1:4230:4230"
+    environment:
+      # Do NOT set DBX_PASSWORD — the multi-account version uses an
+      # interactive setup flow on first login to create the admin account.
+      # If you prefer to pre-seed an admin password, uncomment the next line:
+      # - DBX_PASSWORD=YourAdminPassword
+      - DBX_DATA_DIR=/app/data
+      - DBX_PORT=4230
+      # Uncomment when publishing DBX under a reverse-proxy subpath:
+      # - DBX_PUBLIC_BASE_PATH=/dbx
+    volumes:
+      # Distinct named volume — never shares data with the production
+      # instance (which uses `dbx-data`).
+      - dbx-multi-account-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  dbx-multi-account-data:

@@ -124,6 +124,11 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
+import { useUserStore } from "@/stores/userStore";
+import UserManagement from "@/components/admin/UserManagement.vue";
+import LdapSettings from "@/components/admin/LdapSettings.vue";
+import BackupPanel from "@/components/admin/BackupPanel.vue";
+import AuditLog from "@/components/admin/AuditLog.vue";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
 import { SETTINGS_SEARCH_DEFINITIONS, TOOLBAR_VISIBILITY_ITEMS, createShortcutSettingsSearchDefinitions, resolveSettingsSearchEntries, searchSettings, toolbarVisibilityItemLabel, type SettingsCategory, type SettingsSearchEntry, type ToolbarVisibilityItem } from "@/lib/settings/settingsSearch";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
@@ -144,6 +149,7 @@ const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
+const userStore = useUserStore();
 const { isDark, themeMode, themePalette, cornerStyle, setThemeMode, setThemePalette, setCornerStyle } = useTheme();
 
 const appThemePaletteOptions = computed(
@@ -1409,6 +1415,14 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "ai", label: t("settings.aiTab") },
   { value: "mcp" as const, label: t("settings.mcpTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
+  ...(userStore.isAdmin
+    ? [
+        { value: "admin" as const, label: "User Management" },
+        { value: "ldap" as const, label: "LDAP" },
+        { value: "audit" as const, label: "Audit Log" },
+      ]
+    : []),
+  { value: "backup-restore" as const, label: "Backup & Restore" },
   { value: "about", label: t("settings.aboutTab") },
 ]);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
@@ -6370,6 +6384,26 @@ onUnmounted(() => {
 
             <section v-else-if="activeSettingsTab === 'tunnels'" data-settings-search-id="tunnels" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('tunnels')]">
               <TunnelProfileManager />
+            </section>
+
+            <!-- Admin: User Management -->
+            <section v-else-if="activeSettingsTab === 'admin'" class="py-2">
+              <UserManagement />
+            </section>
+
+            <!-- Admin: LDAP Settings -->
+            <section v-else-if="activeSettingsTab === 'ldap'" class="py-2">
+              <LdapSettings />
+            </section>
+
+            <!-- Admin: Audit Log -->
+            <section v-else-if="activeSettingsTab === 'audit'" class="py-2">
+              <AuditLog />
+            </section>
+
+            <!-- Backup & Restore (all users) -->
+            <section v-else-if="activeSettingsTab === 'backup-restore'" class="py-2">
+              <BackupPanel />
             </section>
 
             <section v-else-if="activeSettingsTab === 'about'" data-settings-search-id="about" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('about')]">

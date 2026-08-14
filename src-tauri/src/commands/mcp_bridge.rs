@@ -517,7 +517,7 @@ async fn resolve_connection(
     connection_name: &str,
 ) -> Result<crate::models::connection::ConnectionConfig, String> {
     let policy = load_mcp_policy(state).await?;
-    let configs = state.storage.load_connections().await.map_err(|e| mcp_policy_unavailable(e.to_string()))?;
+    let configs = state.storage.load_all_connections().await.map_err(|e| mcp_policy_unavailable(e.to_string()))?;
     let config = if let Some(id) = connection_id.filter(|s| !s.is_empty()) {
         configs.iter().find(|c| c.id == id).ok_or_else(|| format!("Connection with id '{}' not found", id))?
     } else {
@@ -601,7 +601,7 @@ pub(crate) async fn ensure_mcp_read_allowed_by_id(
 ) -> Result<(), String> {
     let policy = load_mcp_policy(state).await?;
     ensure_connection_in_mcp_scope(&policy, connection_id)?;
-    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let configs = state.storage.load_all_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
         .find(|config| config.id == connection_id)
@@ -633,7 +633,7 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
     database: &str,
     pipeline_json: &str,
 ) -> Result<(), String> {
-    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let configs = state.storage.load_all_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
         .find(|config| config.id == connection_id)
@@ -653,7 +653,7 @@ async fn ensure_mcp_write_allowed_by_id_with_risk(
     action: &str,
     dangerous: bool,
 ) -> Result<(), String> {
-    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let configs = state.storage.load_all_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
         .find(|config| config.id == connection_id)

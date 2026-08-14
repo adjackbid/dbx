@@ -39,13 +39,14 @@ pub struct LoadTabRuntimeCacheResponse {
 
 pub async fn save_tab_runtime_cache(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SaveTabRuntimeCacheRequest>,
 ) -> Result<Json<()>, AppError> {
     let payload = BASE64.decode(req.payload_base64).map_err(|e| AppError::bad_request(e.to_string()))?;
     state
         .app
         .storage
-        .save_tab_runtime_cache(&req.key, payload, req.row_count, req.column_count, req.owner_id)
+        .save_tab_runtime_cache(&req.key, payload, req.row_count, req.column_count, Some(session.user_id.clone()))
         .await
         .map_err(AppError::internal)?;
     Ok(Json(()))
@@ -53,10 +54,13 @@ pub async fn save_tab_runtime_cache(
 
 pub async fn load_tab_runtime_cache(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Query(query): Query<TabRuntimeCacheKeyQuery>,
 ) -> Result<Json<Option<LoadTabRuntimeCacheResponse>>, AppError> {
     let entry = state.app.storage.load_tab_runtime_cache(&query.key).await.map_err(AppError::internal)?;
-    Ok(Json(entry.map(|entry| LoadTabRuntimeCacheResponse {
+    // Only return cache entries owned by the current user
+    let filtered = entry.filter(|e| e.owner_id.as_deref() == Some(&session.user_id));
+    Ok(Json(filtered.map(|entry| LoadTabRuntimeCacheResponse {
         key: entry.key,
         payload_base64: BASE64.encode(entry.payload),
         row_count: entry.row_count,
@@ -86,6 +90,7 @@ pub struct PruneTabRuntimeCacheRequest {
 
 pub async fn prune_tab_runtime_cache(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(request): Json<PruneTabRuntimeCacheRequest>,
 ) -> Result<Json<dbx_core::storage::TabRuntimeCachePruneResult>, AppError> {
     Ok(Json(

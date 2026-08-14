@@ -15,13 +15,17 @@ pub struct SaveLayoutRequest {
 
 pub async fn save_sidebar_layout(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveLayoutRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_sidebar_layout(&body.layout).await.map_err(AppError::from)?;
+    state.app.storage.save_sidebar_layout_for_user(&session.user_id, &body.layout).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
-pub async fn load_sidebar_layout(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
-    let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError::from)?;
+pub async fn load_sidebar_layout(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let layout = state.app.storage.load_sidebar_layout_for_user(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(layout.unwrap_or(serde_json::json!(null))))
 }

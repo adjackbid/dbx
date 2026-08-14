@@ -90,6 +90,8 @@ export default withEnglishFallback({
     newPassword: "輸入新密碼",
     confirmPassword: "確認密碼",
     enterPassword: "請輸入存取密碼",
+    username: "帳號",
+    newUsername: "管理員帳號",
     passwordMismatch: "兩次輸入的密碼不一致",
     setPassword: "設定密碼",
     login: "登入",

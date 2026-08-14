@@ -3794,8 +3794,9 @@ impl AppState {
         &self,
         connection_id: &str,
         database_info: Option<DatabaseConnectionInfo>,
+        user_id: &str,
     ) -> Result<(), String> {
-        self.storage.save_connection_database_info(connection_id, database_info.clone()).await?;
+        self.storage.save_connection_database_info(connection_id, database_info.clone(), user_id).await?;
         if let Some(config) = self.configs.write().await.get_mut(connection_id) {
             config.database_info = database_info;
         }

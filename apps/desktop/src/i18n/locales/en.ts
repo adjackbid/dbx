@@ -89,6 +89,8 @@ export default {
     newPassword: "Enter new password",
     confirmPassword: "Confirm password",
     enterPassword: "Enter access password",
+    username: "Username",
+    newUsername: "Admin username",
     passwordMismatch: "Passwords do not match",
     setPassword: "Set Password",
     login: "Login",

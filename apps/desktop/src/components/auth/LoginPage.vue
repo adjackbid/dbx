@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
+import { Lock, Loader2, ShieldCheck, User } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import { apiUrl } from "@/lib/common/webPath";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -15,16 +15,30 @@ const props = withDefaults(
   { setupMode: false },
 );
 
-const emit = defineEmits<{ authenticated: [] }>();
+const emit = defineEmits<{ authenticated: [user?: AuthUserInfo] }>();
 const { t } = useI18n();
 
+export interface AuthUserInfo {
+  id: string;
+  username: string;
+  displayName: string;
+  isAdmin: boolean;
+  authSource: string;
+}
+
+const username = ref("");
 const password = ref("");
 const confirmPassword = ref("");
 const error = ref("");
 const loading = ref(false);
 
-// The auth routes report failures as `{"error": "..."}`, so unwrap that before
-// translating; anything else is treated as a plain-text message.
+onMounted(() => {
+  // Pre-fill default admin username in setup mode
+  if (props.setupMode) {
+    username.value = "admin";
+  }
+});
+
 async function readAuthError(res: Response): Promise<string> {
   const text = (await res.text()).trim();
   if (!text) return t("auth.loginFailed");
@@ -51,10 +65,14 @@ async function submit() {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: password.value }),
+      body: JSON.stringify({
+        username: username.value || undefined,
+        password: password.value,
+      }),
     });
     if (res.ok) {
-      emit("authenticated");
+      const data = await res.json().catch(() => ({}));
+      emit("authenticated", data.user);
     } else {
       error.value = await readAuthError(res);
     }
@@ -85,15 +103,26 @@ async function submit() {
           <span>{{ t("auth.setupTitle") }}</span>
         </div>
         <div class="relative">
+          <User class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            v-model="username"
+            type="text"
+            :placeholder="setupMode ? t('auth.newUsername') : t('auth.username')"
+            class="flex h-11 w-full rounded-md border border-input bg-background pl-10 pr-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            autocomplete="off"
+            autofocus
+          />
+        </div>
+        <div class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <PasswordInput v-model="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" inputClass="pl-10 h-11" autocomplete="off" autofocus />
+          <PasswordInput v-model="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" inputClass="pl-10 h-11" autocomplete="off" />
         </div>
         <div v-if="setupMode" class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <PasswordInput v-model="confirmPassword" :placeholder="t('auth.confirmPassword')" inputClass="pl-10 h-11" autocomplete="off" />
         </div>
         <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
-        <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword)">
+        <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword) || (!setupMode && !username)">
           <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
           {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
         </Button>
