@@ -678,6 +678,10 @@ fn ensure_user_id_columns_sync(conn: &Connection) -> Result<(), String> {
     ensure_table_columns(conn, "saved_sql_files", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
     ensure_table_columns(conn, "prompt_templates", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
     ensure_table_columns(conn, "tunnel_profiles", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
+    ensure_table_columns(conn, "ai_configs", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
+    ensure_table_columns(conn, "ai_config", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
+    ensure_table_columns(conn, "ai_provider_configs", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
+    ensure_table_columns(conn, "ai_conversations", &[("user_id", "TEXT NOT NULL DEFAULT ''")])?;
 
     // Create indexes after columns are added
     for stmt in [
@@ -690,6 +694,8 @@ fn ensure_user_id_columns_sync(conn: &Connection) -> Result<(), String> {
         "CREATE INDEX IF NOT EXISTS idx_saved_sql_files_user ON saved_sql_files (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_user ON prompt_templates (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_tunnel_profiles_user ON tunnel_profiles (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_configs_user ON ai_configs (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_conversations_user ON ai_conversations (user_id)",
     ] {
         conn.execute(stmt, []).map_err(|e| e.to_string())?;
     }
@@ -1476,36 +1482,35 @@ impl Storage {
         .await
     }
 
-    pub async fn save_ai_configs(&self, configs: &[AiConfigItem]) -> Result<(), String> {
+    pub async fn save_ai_configs(&self, configs: &[AiConfigItem], user_id: &str) -> Result<(), String> {
         let configs = configs.to_vec();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_configs WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
             for config in &configs {
                 let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
                 let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
                 tx.execute(
-                    "INSERT OR REPLACE INTO ai_configs (id, name, model, models, config_json, is_default) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+                    "INSERT OR REPLACE INTO ai_configs (id, name, model, models, config_json, is_default, user_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32, user_id],
                 )
                 .map_err(|e| e.to_string())?;
             }
-            // Clear old single-config tables — migration is complete, avoids re-migration on empty ai_configs
-            tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
         .await
     }
 
-    pub async fn load_ai_configs(&self) -> Result<Vec<AiConfigItem>, String> {
-        self.with_conn(|conn| {
+    pub async fn load_ai_configs(&self, user_id: &str) -> Result<Vec<AiConfigItem>, String> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs")
+                .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs WHERE user_id = ?1")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map([&user_id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -1545,45 +1550,57 @@ impl Storage {
         .await
     }
 
-    pub async fn set_default_ai_config(&self, config_id: &str) -> Result<(), String> {
+    pub async fn set_default_ai_config(&self, config_id: &str, user_id: &str) -> Result<(), String> {
         let config_id = config_id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("UPDATE ai_configs SET is_default = 0 WHERE is_default = 1", []).map_err(|e| e.to_string())?;
-            tx.execute("UPDATE ai_configs SET is_default = 1 WHERE id = ?1", params![config_id])
+            tx.execute("UPDATE ai_configs SET is_default = 0 WHERE is_default = 1 AND user_id = ?1", [&user_id])
                 .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE ai_configs SET is_default = 1 WHERE id = ?1 AND user_id = ?2",
+                params![config_id, user_id],
+            )
+            .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
         .await
     }
 
-    pub async fn save_ai_config_item(&self, config: &AiConfigItem) -> Result<(), String> {
+    pub async fn save_ai_config_item(&self, config: &AiConfigItem, user_id: &str) -> Result<(), String> {
         let config = config.clone();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
             let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-            // 如果设该配置为默认，先清除其他默认，避免与 idx_ai_configs_default 冲突
             if config.is_default {
                 tx.execute(
-                    "UPDATE ai_configs SET is_default = 0 WHERE is_default = 1 AND id != ?1",
-                    params![config.id],
+                    "UPDATE ai_configs SET is_default = 0 WHERE is_default = 1 AND user_id = ?1 AND id != ?2",
+                    params![user_id, config.id],
                 )
                 .map_err(|e| e.to_string())?;
             }
 
             tx.execute(
-                "INSERT INTO ai_configs (id, name, model, models, config_json, is_default)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO ai_configs (id, name, model, models, config_json, is_default, user_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model,
                  models = excluded.models, config_json = excluded.config_json, is_default = excluded.is_default",
-                params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+                params![
+                    config.id,
+                    config.name,
+                    config.config.model,
+                    models_json,
+                    json,
+                    config.is_default as i32,
+                    user_id
+                ],
             )
             .map_err(|e| {
                 let msg = e.to_string();
-                // SQLite UNIQUE constraint error contains the table and column name
                 if msg.contains("UNIQUE constraint failed") && msg.contains("ai_configs.name") {
                     format!("ai.configNameExists:{}", config.name)
                 } else {
@@ -1597,10 +1614,12 @@ impl Storage {
         .await
     }
 
-    pub async fn delete_ai_config(&self, config_id: &str) -> Result<(), String> {
+    pub async fn delete_ai_config(&self, config_id: &str, user_id: &str) -> Result<(), String> {
         let config_id = config_id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM ai_configs WHERE id = ?1", params![config_id]).map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM ai_configs WHERE id = ?1 AND user_id = ?2", params![config_id, user_id])
+                .map_err(|e| e.to_string())?;
             Ok(())
         })
         .await

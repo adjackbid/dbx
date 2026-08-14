@@ -1420,9 +1420,9 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
         { value: "admin" as const, label: "User Management" },
         { value: "ldap" as const, label: "LDAP" },
         { value: "audit" as const, label: "Audit Log" },
+        { value: "backup-restore" as const, label: "Backup & Restore" },
       ]
     : []),
-  { value: "backup-restore" as const, label: "Backup & Restore" },
   { value: "about", label: t("settings.aboutTab") },
 ]);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
@@ -6373,12 +6373,17 @@ onUnmounted(() => {
                 <p class="text-sm text-muted-foreground">
                   {{ t("auth.changePasswordDescription") }}
                 </p>
-                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
-                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
-                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
-                <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
-                  {{ passwordMessage }}
-                </p>
+                <div v-if="userStore.currentUser?.authSource === 'ldap'" class="rounded-md border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 p-3 text-sm text-amber-700 dark:text-amber-400">
+                  LDAP authenticated accounts cannot change passwords locally. Please contact your LDAP administrator.
+                </div>
+                <template v-else>
+                  <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
+                  <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
+                  <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
+                  <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
+                    {{ passwordMessage }}
+                  </p>
+                </template>
               </div>
             </section>
 
@@ -6401,8 +6406,8 @@ onUnmounted(() => {
               <AuditLog />
             </section>
 
-            <!-- Backup & Restore (all users) -->
-            <section v-else-if="activeSettingsTab === 'backup-restore'" class="py-2">
+            <!-- Backup & Restore (admin only) -->
+            <section v-else-if="activeSettingsTab === 'backup-restore' && userStore.isAdmin" class="py-2">
               <BackupPanel />
             </section>
 

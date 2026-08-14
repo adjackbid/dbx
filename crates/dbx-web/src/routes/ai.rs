@@ -193,17 +193,21 @@ pub struct SaveAiConfigsRequest {
 
 pub async fn save_ai_configs(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiConfigsRequest>,
 ) -> Result<Json<()>, AppError> {
     for item in &body.configs {
         reject_web_unsupported_ai_provider(&item.config)?;
     }
-    state.app.storage.save_ai_configs(&body.configs).await.map_err(AppError::from)?;
+    state.app.storage.save_ai_configs(&body.configs, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
-pub async fn load_ai_configs(State(state): State<Arc<WebState>>) -> Result<Json<Vec<AiConfigItem>>, AppError> {
-    let configs = state.app.storage.load_ai_configs().await.map_err(AppError::from)?;
+pub async fn load_ai_configs(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<Vec<AiConfigItem>>, AppError> {
+    let configs = state.app.storage.load_ai_configs(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(configs))
 }
 
@@ -215,9 +219,10 @@ pub struct SetDefaultAiConfigRequest {
 
 pub async fn set_default_ai_config(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SetDefaultAiConfigRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.set_default_ai_config(&body.config_id).await.map_err(AppError::from)?;
+    state.app.storage.set_default_ai_config(&body.config_id, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -229,18 +234,20 @@ pub struct SaveAiConfigItemRequest {
 
 pub async fn save_ai_config_item(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiConfigItemRequest>,
 ) -> Result<Json<()>, AppError> {
     reject_web_unsupported_ai_provider(&body.config.config)?;
-    state.app.storage.save_ai_config_item(&body.config).await.map_err(AppError::from)?;
+    state.app.storage.save_ai_config_item(&body.config, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn delete_ai_config(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Path(config_id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.delete_ai_config(&config_id).await.map_err(AppError::from)?;
+    state.app.storage.delete_ai_config(&config_id, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 

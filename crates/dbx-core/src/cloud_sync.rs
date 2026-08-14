@@ -1045,7 +1045,7 @@ async fn build_sensitive_payload(
 
     Ok(SensitiveSyncPayload {
         connection_secrets,
-        ai_configs: Some(storage.load_ai_configs().await.unwrap_or_default()),
+        ai_configs: Some(storage.load_ai_configs("").await.unwrap_or_default()),
         ai_config: None,
         tunnel_profiles: Some(tunnel_profiles.to_vec()),
     })
@@ -1185,7 +1185,7 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
     }
     if let Some(configs) = &payload.ai_configs {
         // New format: save directly (empty = all configs were deleted)
-        storage.save_ai_configs(configs).await?;
+        storage.save_ai_configs(configs, "").await?;
     } else if let Some(old_config) = &payload.ai_config {
         // A legacy snapshot still represents the complete AI configuration state.
         // Replace local configs just like the new list format so a generated ID
@@ -1197,7 +1197,7 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
             is_default: true,
             config: old_config.clone(),
         };
-        storage.save_ai_configs(&[item]).await?;
+        storage.save_ai_configs(&[item], "").await?;
     }
     if let Some(profiles) = &payload.tunnel_profiles {
         storage.save_tunnel_profiles(profiles).await?;
@@ -2471,7 +2471,7 @@ mod tests {
             tunnel_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert!(loaded.is_empty(), "None → no configs written");
     }
 
@@ -2491,7 +2491,7 @@ mod tests {
             tunnel_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert!(loaded.is_empty(), "Some([]) → table cleared");
     }
 
@@ -2516,7 +2516,7 @@ mod tests {
             tunnel_profiles: None,
         };
         apply_sensitive_payload(&storage, &payload).await.unwrap();
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 2);
         let opencode = loaded.iter().find(|item| item.name == "synced").unwrap();
         assert!(matches!(opencode.config.provider, crate::ai::AiProvider::OpenCodeCli));
@@ -2552,7 +2552,7 @@ mod tests {
         // Reapplying the same old snapshot must not collide with the generated ID.
         apply_sensitive_payload(&storage, &payload).await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "openai");
         assert_eq!(loaded[0].config.model, "snapshot-model");

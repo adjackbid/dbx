@@ -5,6 +5,19 @@ const DB_VERSION = 1;
 const STORE_NAME = "state";
 const LOCAL_STORAGE_PREFIX = "dbx-app-state:";
 
+// Current user ID for per-user browser state scoping.
+// When set, all keys are prefixed with "u_{userId}:" so different users
+// on the same browser get isolated settings (AI config, MCP, shortcuts, etc.).
+let currentUserId: string | null = null;
+
+export function setCurrentUserId(id: string | null) {
+  currentUserId = id;
+}
+
+function currentUserScope(key: string): string {
+  return currentUserId ? `u_${currentUserId}:${key}` : key;
+}
+
 function indexedDb(): IDBFactory | undefined {
   return typeof globalThis.indexedDB === "undefined" ? undefined : globalThis.indexedDB;
 }
@@ -51,10 +64,11 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
 }
 
 export async function loadBrowserAppState(key: string): Promise<unknown | null> {
-  const value = await withStore("readonly", (store) => store.get(key));
+  const scopedKey = currentUserScope(key);
+  const value = await withStore("readonly", (store) => store.get(scopedKey));
   if (value !== null && value !== undefined) return value;
 
-  const fallback = safeLocalStorageGet(fallbackKey(key));
+  const fallback = safeLocalStorageGet(fallbackKey(scopedKey));
   if (!fallback) return null;
   try {
     return JSON.parse(fallback);
@@ -64,13 +78,14 @@ export async function loadBrowserAppState(key: string): Promise<unknown | null> 
 }
 
 export async function saveBrowserAppState(key: string, value: unknown): Promise<void> {
-  const result = await withStore("readwrite", (store) => store.put(value, key));
+  const scopedKey = currentUserScope(key);
+  const result = await withStore("readwrite", (store) => store.put(value, scopedKey));
   if (result !== null) return;
-  safeLocalStorageSet(fallbackKey(key), JSON.stringify(value));
+  safeLocalStorageSet(fallbackKey(scopedKey), JSON.stringify(value));
 }
 
 export async function clearAllBrowserAppState(): Promise<void> {
-  // Clear IndexedDB store
+  // Clear IndexedDB store (all users' data)
   const db = await openDb();
   if (db) {
     try {
@@ -84,15 +99,15 @@ export async function clearAllBrowserAppState(): Promise<void> {
       // ignore
     }
   }
-  // Clear localStorage fallback keys
+  // Clear ALL localStorage keys with our prefix (all users)
   for (let i = localStorage.length - 1; i >= 0; i--) {
     const key = localStorage.key(i);
     if (key && key.startsWith(LOCAL_STORAGE_PREFIX)) {
       localStorage.removeItem(key);
     }
   }
-  // Also clear editor settings and other known localStorage keys
-  for (const key of ["dbx-editor-settings", "dbx-app-state:open_tabs", "dbx-app-state:editor_settings"]) {
+  // Also clear known legacy keys
+  for (const key of ["dbx-editor-settings"]) {
     localStorage.removeItem(key);
   }
 }

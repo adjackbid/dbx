@@ -19,7 +19,7 @@ import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitio
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserStore } from "@/stores/userStore";
-import { clearAllBrowserAppState } from "@/lib/backend/browserAppStateStorage";
+import { clearAllBrowserAppState, setCurrentUserId } from "@/lib/backend/browserAppStateStorage";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
@@ -2333,6 +2333,8 @@ function onLoginSuccess(user?: any) {
       clearAllBrowserAppState().catch(() => {});
     }
     userStore.currentUser = user;
+    // Set the current user ID for per-user browser state scoping
+    setCurrentUserId(user.id);
   }
   authenticated.value = true;
   setupRequired.value = false;
@@ -2487,6 +2489,7 @@ onMounted(async () => {
       if (data.user) {
         const userStore = useUserStore();
         userStore.currentUser = data.user;
+        setCurrentUserId(data.user.id);
       }
     } catch {
       /* server unreachable */
