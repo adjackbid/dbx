@@ -219,7 +219,7 @@ pub async fn export_backup(
     }
 
     if include.contains(&"ai_conversations".to_string()) {
-        let conversations = storage.load_ai_conversations().await?;
+        let conversations = storage.load_ai_conversations("").await?;
         let json = serde_json::to_string(&conversations).map_err(|e| e.to_string())?;
         zip.start_file("ai_conversations.json", options).map_err(|e| e.to_string())?;
         zip.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
@@ -322,7 +322,7 @@ pub async fn import_backup(
                     serde_json::from_slice(&data).map_err(|e| format!("Invalid conversations data: {e}"))?;
                 summary.ai_conversations = conversations.len();
                 for conv in &conversations {
-                    storage.save_ai_conversation(conv).await?;
+                    storage.save_ai_conversation(conv, "").await?;
                 }
             }
             "settings.json" => {

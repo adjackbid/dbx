@@ -257,22 +257,27 @@ pub async fn delete_ai_config(
 
 pub async fn save_ai_conversation(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiConversationRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_ai_conversation(&body.conversation).await.map_err(AppError::from)?;
+    state.app.storage.save_ai_conversation(&body.conversation, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
-pub async fn load_ai_conversations(State(state): State<Arc<WebState>>) -> Result<Json<Vec<AiConversation>>, AppError> {
-    let conversations = state.app.storage.load_ai_conversations().await.map_err(AppError::from)?;
+pub async fn load_ai_conversations(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<Vec<AiConversation>>, AppError> {
+    let conversations = state.app.storage.load_ai_conversations(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(conversations))
 }
 
 pub async fn delete_ai_conversation(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.delete_ai_conversation(&id).await.map_err(AppError::from)?;
+    state.app.storage.delete_ai_conversation(&id, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 

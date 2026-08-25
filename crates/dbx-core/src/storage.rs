@@ -2320,14 +2320,15 @@ impl Storage {
 // AI Conversations
 
 impl Storage {
-    pub async fn save_ai_conversation(&self, conv: &AiConversation) -> Result<(), String> {
+    pub async fn save_ai_conversation(&self, conv: &AiConversation, user_id: &str) -> Result<(), String> {
         let conv = conv.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, title, connection_name, database, messages_json, created_at, updated_at, user_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     conv.id,
                     conv.title,
@@ -2335,15 +2336,16 @@ impl Storage {
                     conv.database,
                     messages_json,
                     conv.created_at,
-                    conv.updated_at
+                    conv.updated_at,
+                    user_id,
                 ],
             )
             .map_err(|e| e.to_string())?;
 
             conn.execute(
-                "DELETE FROM ai_conversations WHERE id NOT IN \
-                 (SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT 50)",
-                [],
+                "DELETE FROM ai_conversations WHERE user_id = ?1 AND id NOT IN \
+                 (SELECT id FROM ai_conversations WHERE user_id = ?1 ORDER BY updated_at DESC LIMIT 50)",
+                [&user_id],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -2351,16 +2353,17 @@ impl Storage {
         .await
     }
 
-    pub async fn load_ai_conversations(&self) -> Result<Vec<AiConversation>, String> {
-        self.with_conn(|conn| {
+    pub async fn load_ai_conversations(&self, user_id: &str) -> Result<Vec<AiConversation>, String> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, title, connection_name, database, messages_json, created_at, updated_at \
-                     FROM ai_conversations ORDER BY updated_at DESC",
+                     FROM ai_conversations WHERE user_id = ?1 ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map([&user_id], |row| {
                     let messages_json: String = row.get(4)?;
                     let messages: Vec<AiChatMessage> =
                         serde_json::from_str(&messages_json).map_err(map_from_sql_err)?;
@@ -2380,10 +2383,13 @@ impl Storage {
         .await
     }
 
-    pub async fn delete_ai_conversation(&self, id: &str) -> Result<(), String> {
+    pub async fn delete_ai_conversation(&self, id: &str, user_id: &str) -> Result<(), String> {
         let id = id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM ai_conversations WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+            conn.execute("DELETE FROM ai_conversations WHERE id = ?1 AND user_id = ?2", params![id, user_id])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .await
     }
@@ -3334,16 +3340,17 @@ impl Storage {
         .await
     }
 
-    pub async fn load_saved_sql_library_summary(&self) -> Result<SavedSqlLibrary, String> {
-        self.with_conn(|conn| {
+    pub async fn load_saved_sql_library_summary(&self, user_id: &str) -> Result<SavedSqlLibrary, String> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
             let mut folder_stmt = conn
                 .prepare(
                     "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
-                     FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                     FROM saved_sql_folders WHERE user_id = ?1 ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
             let folders = folder_stmt
-                .query_map([], |row| {
+                .query_map([&user_id], |row| {
                     Ok(SavedSqlFolder {
                         id: row.get(0)?,
                         connection_id: row.get(1)?,
@@ -3361,11 +3368,11 @@ impl Storage {
             let mut file_stmt = conn
                 .prepare(
                     "SELECT id, connection_id, folder_id, name, database_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
-                     FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
+                     FROM saved_sql_files WHERE user_id = ?1 ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
             let files = file_stmt
-                .query_map([], |row| {
+                .query_map([&user_id], |row| {
                     Ok(SavedSqlFile {
                         id: row.get(0)?,
                         connection_id: row.get(1)?,
@@ -3391,16 +3398,17 @@ impl Storage {
         .await
     }
 
-    pub async fn load_saved_sql_file(&self, id: &str) -> Result<Option<SavedSqlFile>, String> {
+    pub async fn load_saved_sql_file(&self, id: &str, user_id: &str) -> Result<Option<SavedSqlFile>, String> {
         let id = id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
-                     FROM saved_sql_files WHERE id = ?1",
+                     FROM saved_sql_files WHERE id = ?1 AND user_id = ?2",
                 )
                 .map_err(|e| e.to_string())?;
-            match stmt.query_row([id], |row| {
+            match stmt.query_row(params![id, user_id], |row| {
                 Ok(SavedSqlFile {
                     id: row.get(0)?,
                     connection_id: row.get(1)?,
@@ -3425,12 +3433,13 @@ impl Storage {
         .await
     }
 
-    pub async fn save_saved_sql_folder(&self, folder: &SavedSqlFolder) -> Result<(), String> {
+    pub async fn save_saved_sql_folder(&self, folder: &SavedSqlFolder, user_id: &str) -> Result<(), String> {
         let folder = folder.clone();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, user_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  parent_folder_id = excluded.parent_folder_id, \
@@ -3444,7 +3453,8 @@ impl Storage {
                     folder.name,
                     folder.order_index,
                     folder.created_at,
-                    folder.updated_at
+                    folder.updated_at,
+                    user_id,
                 ],
             )
             .map(|_| ())
@@ -3453,8 +3463,9 @@ impl Storage {
         .await
     }
 
-    pub async fn delete_saved_sql_folder(&self, id: &str) -> Result<(), String> {
+    pub async fn delete_saved_sql_folder(&self, id: &str, user_id: &str) -> Result<(), String> {
         let id = id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             let mut folder_ids = vec![id.clone()];
@@ -3462,10 +3473,10 @@ impl Storage {
             while index < folder_ids.len() {
                 let parent_id = folder_ids[index].clone();
                 let mut stmt = tx
-                    .prepare("SELECT id FROM saved_sql_folders WHERE parent_folder_id = ?1")
+                    .prepare("SELECT id FROM saved_sql_folders WHERE parent_folder_id = ?1 AND user_id = ?2")
                     .map_err(|e| e.to_string())?;
                 let child_ids = stmt
-                    .query_map([parent_id.as_str()], |row| row.get::<_, String>(0))
+                    .query_map(params![parent_id, &user_id], |row| row.get::<_, String>(0))
                     .map_err(|e| e.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
@@ -3473,30 +3484,37 @@ impl Storage {
                 index += 1;
             }
             for folder_id in folder_ids.iter().rev() {
-                tx.execute("DELETE FROM saved_sql_files WHERE folder_id = ?1", [folder_id.as_str()])
-                    .map_err(|e| e.to_string())?;
-                tx.execute("DELETE FROM saved_sql_folders WHERE id = ?1", [folder_id.as_str()])
-                    .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "DELETE FROM saved_sql_files WHERE folder_id = ?1 AND user_id = ?2",
+                    params![folder_id, &user_id],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "DELETE FROM saved_sql_folders WHERE id = ?1 AND user_id = ?2",
+                    params![folder_id, &user_id],
+                )
+                .map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
 
-    pub async fn save_saved_sql_file(&self, file: &SavedSqlFile) -> Result<(), String> {
+    pub async fn save_saved_sql_file(&self, file: &SavedSqlFile, user_id: &str) -> Result<(), String> {
         let file = file.clone();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, user_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
                  name = excluded.name, \
                  database_name = excluded.database_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = CASE WHEN ?13 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
+                 sql_text = CASE WHEN ?14 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
@@ -3514,6 +3532,7 @@ impl Storage {
                     file.opened_at,
                     file.created_at,
                     file.updated_at,
+                    user_id,
                     file.sql_loaded
                 ],
             )
@@ -3523,10 +3542,13 @@ impl Storage {
         .await
     }
 
-    pub async fn delete_saved_sql_file(&self, id: &str) -> Result<(), String> {
+    pub async fn delete_saved_sql_file(&self, id: &str, user_id: &str) -> Result<(), String> {
         let id = id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM saved_sql_files WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+            conn.execute("DELETE FROM saved_sql_files WHERE id = ?1 AND user_id = ?2", params![id, user_id])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .await
     }

@@ -263,17 +263,17 @@ fn is_explicit_cli_path(command: &str) -> bool {
 
 #[tauri::command]
 pub async fn save_ai_conversation(state: State<'_, Arc<AppState>>, conversation: AiConversation) -> Result<(), String> {
-    state.storage.save_ai_conversation(&conversation).await
+    state.storage.save_ai_conversation(&conversation, "").await
 }
 
 #[tauri::command]
 pub async fn load_ai_conversations(state: State<'_, Arc<AppState>>) -> Result<Vec<AiConversation>, String> {
-    state.storage.load_ai_conversations().await
+    state.storage.load_ai_conversations("").await
 }
 
 #[tauri::command]
 pub async fn delete_ai_conversation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.storage.delete_ai_conversation(&id).await
+    state.storage.delete_ai_conversation(&id, "").await
 }
 
 #[cfg(test)]
