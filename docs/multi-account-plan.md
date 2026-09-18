@@ -235,7 +235,10 @@ pub struct UserSession {
 | **重設他人密碼** | ✅ | ❌ | ❌ |
 | **授予 / 撤銷管理員權限** | ✅ | ❌ | ❌ |
 | **設定 LDAP** | ✅ | ❌ | ❌ |
-| **系統設定**（全域 editor、MCP policy...） | ✅ | ❌ | ❌ |
+| **實例層級設定**（AI 回合/重試上限、雲端同步 WebDAV） | ✅ | ❌ | ❌ |
+| **自己的 AI 設定**（供應商金鑰、模式、全域指令） | ✅ | ✅ | ✅ |
+| **自己的範本 / 程式碼片段 / 隧道設定檔** | ✅ | ✅ | ✅ |
+| **自己的 MCP 策略**（連線範圍、執行權限） | ✅ | ✅ | ✅ |
 | **查看所有使用者資料**（稽核） | ✅ | ❌ | ❌ |
 
 > **核心原則：一般使用者（`is_admin = 0`）完全無法新增、編輯、刪除其它使用者，也無法變更任何人的角色。唯有 `is_admin = 1` 的管理者能將另一位使用者提升為管理員或降級為一般使用者。**
@@ -307,6 +310,22 @@ pub async fn list_connections(
 - `settingsStore`、`connectionStore`、`savedSqlStore`、`promptTemplateStore`、`historyStore` 等 store 在初始化時，從 session 取得 `user_id`
 - 所有 API 請求 header 帶上 session token（已由 cookie 處理）
 - 新增 `userStore`：管理當前登入使用者資訊、帳號切換
+
+### 5.5 設定歸屬現況（2026-09 稽核）
+
+| 類別 | 存放位置 | 歸屬 |
+| --- | --- | --- |
+| UI／編輯器偏好（語言、主題、字型、縮放、介面配置、快速鍵…） | Web：瀏覽器 IndexedDB／localStorage（key 前綴 `u_{userId}:`）；桌面：`app_state` | 個人 |
+| 桌面／應用偏好（`desktopSettings`） | Web：`dbx-desktop-settings:u_{userId}`；桌面：`app_settings` | 個人 |
+| 連線＋密文、SQL 歷史、AI 對話、AI 設定（`ai_configs`）、收藏 SQL、MQ token、側邊欄版面、釘選節點 | 各自資料表／`user_settings` | 個人 |
+| 程式碼片段（`prompt_templates`）、AI 全域指令、隧道設定檔（`tunnel_profiles`） | 資料表 `user_id` 欄位（`UNIQUE(name)` 已改為應用層同帳號檢查） | 個人 |
+| AI 模式／選用模型（`ai_chat_selection_v1`）、舊版 AI 設定（`ai_config`／`ai_provider_configs`） | `user_settings`／資料表 `user_id` | 個人 |
+| MCP 策略（連線範圍、執行權限） | `user_settings.mcp_policy` | 個人 |
+| AI 回合上限、重試次數 | `app_settings` | 實例層級，僅管理員可寫 |
+| 雲端同步（WebDAV 目標與密碼、同步密文口令、片段同步 token） | `app_settings`／`app_state` | 實例層級，僅管理員可存取（Web 無此 UI） |
+| 使用者管理、LDAP、稽核、備份還原、登入密碼 | — | 管理員（後端 `is_admin` 檢查） |
+
+舊版單機資料在開啟資料庫時一次性移交給原歸屬帳號（桌面資料仍屬空帳號則歸空帳號，否則歸最早的管理員），其餘帳號一律從預設值開始，避免繼承他人的 allowlist、範本或 AI 金鑰。
 
 ---
 

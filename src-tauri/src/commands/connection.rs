@@ -419,7 +419,7 @@ mod tests {
         let mut other = mongodb_config();
         other.id = "other".to_string();
         other.name = "Other MongoDB".to_string();
-        state.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+        state.storage.save_connections(&[mongo.clone(), other.clone()], "").await.unwrap();
 
         persist_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        state.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
+        state.storage.save_connections(std::slice::from_ref(&updated), "").await.unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
 

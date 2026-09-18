@@ -1004,7 +1004,7 @@ mod tests {
     use dbx_core::{
         agent_events::ToolResult,
         agent_tools::AgentSqlPermissions,
-        storage::{McpGlobalPolicy, Storage},
+        storage::{McpUserPolicy, Storage},
     };
     use dbx_mcp::{backend::new_connection_config, mongo::MongoCommand};
 
@@ -1034,8 +1034,8 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for MongoBackend {
-        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-            Ok(McpGlobalPolicy::default())
+        async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
+            Ok(McpUserPolicy::default())
         }
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {

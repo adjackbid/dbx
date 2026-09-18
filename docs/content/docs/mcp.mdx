@@ -42,7 +42,7 @@ AI agent → DBX MCP → your database → results
     }
     ```
 
-    If you installed the package globally, you can use `"command": "dbx-mcp-server"`. Manage the connection allowlist and execution mode centrally in **DBX Settings → MCP**; normal client configs do not need permission variables. For Windows portable DBX, set `DBX_DATA_DIR` to the `data` directory next to `DBX.exe`.
+    If you installed the package globally, you can use `"command": "dbx-mcp-server"`. Manage the connection allowlist and execution mode for your account in **DBX Settings → MCP**; in DBX Web each account keeps its own allowlist and execution mode. Normal client configs do not need permission variables. For Windows portable DBX, set `DBX_DATA_DIR` to the `data` directory next to `DBX.exe`.
   </Step>
   <Step>
     ### Start Using
@@ -136,7 +136,7 @@ DBX Web and Docker require the same standalone DuckDB driver. Install it from Dr
 
 ## Safety and Environment Variables
 
-DBX stores one authoritative MCP policy under **Settings → MCP** and reloads it for every request:
+DBX stores one MCP policy per account under **Settings → MCP** and reloads it for every request. An MCP client uses the policy of the account it authenticated as, so its connection allowlist and execution mode always belong to that account:
 
 | Permission mode | Allowed operations |
 | --- | --- |
@@ -146,7 +146,7 @@ DBX stores one authoritative MCP policy under **Settings → MCP** and reloads i
 
 An ineffective condition such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, or an opaque MongoDB filter remains high risk. Connection-level read-only protection, production protection, database credentials, and the MCP connection allowlist remain upper bounds in every mode.
 
-Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
+Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until an account policy is saved for the first time. After that, the account policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
 
 | Variable | Purpose |
 | --- | --- |

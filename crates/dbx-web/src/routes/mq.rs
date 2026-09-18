@@ -1514,16 +1514,14 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::{create_exchange, delete_user, list_tenants, send_message, ConnReq, CreateExchangeReq, SendMessageReq};
-    use crate::state::{LoginRateLimit, WebState};
+    use crate::state::WebState;
     use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue};
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
-    use std::collections::{HashMap, HashSet};
+    use dbx_core::storage::{McpUserPolicy, Storage};
     use std::sync::Arc;
-    use tokio::sync::{Mutex, RwLock};
 
     fn mq_config() -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({
@@ -1544,22 +1542,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
-        let state = Arc::new(WebState {
-            app,
-            data_dir: dir.clone(),
-            public_base_path: "/".to_string(),
-            password_disabled: false,
-            password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
-            sse_channels: RwLock::new(HashMap::new()),
-            transfer_progress_channels: RwLock::new(HashMap::new()),
-            table_import_channels: RwLock::new(HashMap::new()),
-            sql_file_executions: RwLock::new(HashMap::new()),
-            nacos_imports: RwLock::new(HashMap::new()),
-            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
-            export_files: RwLock::new(HashMap::new()),
-            ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
-        });
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
     }
 
@@ -1569,8 +1552,8 @@ mod tests {
         headers
     }
 
-    fn writable_policy(connection_id: &str) -> McpGlobalPolicy {
-        McpGlobalPolicy {
+    fn writable_policy(connection_id: &str) -> McpUserPolicy {
+        McpUserPolicy {
             read_only: false,
             allow_dangerous_sql: true,
             allowed_connection_ids: Some(vec![connection_id.to_string()]),
@@ -1592,14 +1575,17 @@ mod tests {
     async fn mcp_scope_blocks_out_of_scope_connection() {
         let (state, dir) = test_web_state().await;
         let connection = mq_config();
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                allowed_connection_ids: Some(vec!["some-other-connection".to_string()]),
-                ..writable_policy(&connection.id)
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    allowed_connection_ids: Some(vec!["some-other-connection".to_string()]),
+                    ..writable_policy(&connection.id)
+                },
+            )
             .await
             .unwrap();
         let headers = mcp_headers();
@@ -1634,11 +1620,11 @@ mod tests {
     async fn mcp_read_only_mode_blocks_mq_mutations_but_allows_reads() {
         let (state, dir) = test_web_state().await;
         let connection = mq_config();
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..writable_policy(&connection.id) })
+            .save_mcp_user_policy("", &McpUserPolicy { read_only: true, ..writable_policy(&connection.id) })
             .await
             .unwrap();
         let headers = mcp_headers();
@@ -1691,11 +1677,11 @@ mod tests {
     async fn mcp_dangerous_gate_blocks_high_risk_mq_ops_only() {
         let (state, dir) = test_web_state().await;
         let connection = mq_config();
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy { allow_dangerous_sql: false, ..writable_policy(&connection.id) })
+            .save_mcp_user_policy("", &McpUserPolicy { allow_dangerous_sql: false, ..writable_policy(&connection.id) })
             .await
             .unwrap();
         let headers = mcp_headers();
@@ -1725,8 +1711,8 @@ mod tests {
     async fn mcp_guards_allow_in_scope_writable_connection() {
         let (state, dir) = test_web_state().await;
         let connection = mq_config();
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
-        state.app.storage.save_mcp_global_policy(&writable_policy(&connection.id)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
+        state.app.storage.save_mcp_user_policy("", &writable_policy(&connection.id)).await.unwrap();
         let headers = mcp_headers();
 
         assert!(

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use dbx_core::models::connection::ConnectionConfig;
-use dbx_core::storage::McpGlobalPolicy;
+use dbx_core::storage::McpUserPolicy;
 
 use crate::error::AppError;
 use crate::state::WebState;
@@ -227,11 +227,21 @@ fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
     })
 }
 
-async fn load_policy(state: &Arc<WebState>) -> Result<McpGlobalPolicy, AppError> {
-    state.app.storage.load_mcp_global_policy().await.map(|state| state.policy()).map_err(AppError::from)
+/// Resolve the MCP policy that governs a connection from the account that owns
+/// it. Scope and write level are per account, so a request can only ever be
+/// evaluated against the owner's own policy.
+async fn load_policy_for_connection(state: &Arc<WebState>, connection_id: &str) -> Result<McpUserPolicy, AppError> {
+    let owner = state
+        .app
+        .storage
+        .connection_user_id(connection_id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::from(format!("Connection with id '{connection_id}' not found")))?;
+    state.app.storage.load_mcp_user_policy(&owner).await.map(|state| state.policy()).map_err(AppError::from)
 }
 
-fn ensure_allowed(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), AppError> {
+fn ensure_allowed(policy: &McpUserPolicy, connection_id: &str) -> Result<(), AppError> {
     if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
         return Err(AppError::from(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
@@ -260,7 +270,7 @@ pub async fn ensure_scope(state: &Arc<WebState>, headers: &HeaderMap, connection
     if !is_mcp_request(headers) {
         return Ok(());
     }
-    ensure_allowed(&load_policy(state).await?, connection_id)
+    ensure_allowed(&load_policy_for_connection(state, connection_id).await?, connection_id)
 }
 
 pub async fn ensure_write(
@@ -313,7 +323,7 @@ async fn ensure_write_with_risk(
     if !is_mcp_request(headers) {
         return Ok(());
     }
-    let policy = load_policy(state).await?;
+    let policy = load_policy_for_connection(state, connection_id).await?;
     ensure_allowed(&policy, connection_id)?;
     if policy.read_only {
         return Err(AppError::from(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked.")));
@@ -349,7 +359,7 @@ pub async fn ensure_sql(
     if !is_mcp_request(headers) {
         return Ok(());
     }
-    let policy = load_policy(state).await?;
+    let policy = load_policy_for_connection(state, connection_id).await?;
     ensure_allowed(&policy, connection_id)?;
     let config = load_connection(state, connection_id).await?;
     if !allow_database_switch && dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, config.db_type) {

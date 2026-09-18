@@ -39,7 +39,7 @@ export interface DesktopSettings {
   sidebar_table_page_size?: number | null;
 }
 
-export interface McpGlobalPolicy {
+export interface McpUserPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
@@ -75,14 +75,14 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
-export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
+export const DEFAULT_MCP_USER_POLICY: McpUserPolicy = {
   readOnly: false,
   allowDangerousSql: false,
   allowedConnectionIds: null,
   configured: false,
 };
 
-export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
+export function normalizeMcpUserPolicy(policy: Partial<McpUserPolicy> | null | undefined): McpUserPolicy {
   const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
   return {
     readOnly: policy?.readOnly === true,
@@ -1197,11 +1197,11 @@ export const useSettingsStore = defineStore("settings", () => {
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
-  const mcpGlobalPolicy = ref<McpGlobalPolicy>({
-    ...DEFAULT_MCP_GLOBAL_POLICY,
+  const mcpUserPolicy = ref<McpUserPolicy>({
+    ...DEFAULT_MCP_USER_POLICY,
   });
   const isDesktopSettingsLoaded = ref(false);
-  const isMcpGlobalPolicyLoaded = ref(false);
+  const isMcpUserPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
@@ -1296,28 +1296,28 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   }
 
-  async function initMcpGlobalPolicy(force = false) {
-    if (isMcpGlobalPolicyLoaded.value && !force) return;
-    mcpGlobalPolicy.value = normalizeMcpGlobalPolicy(await api.loadMcpGlobalPolicy());
-    isMcpGlobalPolicyLoaded.value = true;
+  async function initMcpUserPolicy(force = false) {
+    if (isMcpUserPolicyLoaded.value && !force) return;
+    mcpUserPolicy.value = normalizeMcpUserPolicy(await api.loadMcpUserPolicy());
+    isMcpUserPolicyLoaded.value = true;
   }
 
-  async function updateMcpGlobalPolicy(partial: Partial<Omit<McpGlobalPolicy, "configured">>) {
-    const previous = mcpGlobalPolicy.value;
-    const next = normalizeMcpGlobalPolicy({
+  async function updateMcpUserPolicy(partial: Partial<Omit<McpUserPolicy, "configured">>) {
+    const previous = mcpUserPolicy.value;
+    const next = normalizeMcpUserPolicy({
       ...previous,
       ...partial,
       configured: true,
     });
-    mcpGlobalPolicy.value = next;
+    mcpUserPolicy.value = next;
     try {
-      await api.saveMcpGlobalPolicy({
+      await api.saveMcpUserPolicy({
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         allowedConnectionIds: next.allowedConnectionIds,
       });
     } catch (error) {
-      mcpGlobalPolicy.value = previous;
+      mcpUserPolicy.value = previous;
       throw error;
     }
   }
@@ -1718,14 +1718,14 @@ export const useSettingsStore = defineStore("settings", () => {
     isEditorSettingsLoaded,
     editorSettings,
     desktopSettings,
-    mcpGlobalPolicy,
+    mcpUserPolicy,
     initEditorSettings,
     updateEditorSettings,
     persistEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,
-    initMcpGlobalPolicy,
-    updateMcpGlobalPolicy,
+    initMcpUserPolicy,
+    updateMcpUserPolicy,
     updateColumnFormatter,
     upsertCustomColumnFormatter,
     deleteCustomColumnFormatter,

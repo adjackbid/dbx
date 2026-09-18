@@ -158,7 +158,7 @@ npx @dbx-app/mcp-server
 
 连接 allowlist 和“只读 / 数据读写 / 完全访问”三档执行权限统一在 DBX 的“设置 → MCP”中管理。机器可读值仍为 `read_only`、`safe_write`、`high_risk_write`；客户端配置无需声明权限或连接范围环境变量。
 
-为兼容升级，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仅在中央 MCP 策略首次保存前继续作为只读限制；它不能开启写入，也不能覆盖已经保存的中央策略。
+为兼容升级，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仅在账号 MCP 策略首次保存前继续作为只读限制；它不能开启写入，也不能覆盖已经保存的账号策略。
 
 Windows 便携版需要在 MCP 配置中设置 `DBX_DATA_DIR`，指向 `DBX.exe` 同级的 `data` 目录（即包含 `dbx.db` 的文件夹）。
 
@@ -388,6 +388,7 @@ make package
 - [数据库测试实验室](https://dbxio.com/cn/docs/database-lab) — 用于开发和验证的本地数据库配方
 - [贡献指南](CONTRIBUTING.zh-CN.md) — 如何认领 Issue 并提交 PR
 - [Web API 参考](docs/content/docs/web-api.cn.mdx) — Docker/Web 部署的 HTTP API
+- [Windows/IIS 部署](deploy/iis/README.md) — 不用 Docker，以原生 Windows 可执行文件挂在 IIS 后面
 - [示例代码](examples/) — CLI、MCP、Docker 与 API 示例
 
 ## 社区

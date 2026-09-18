@@ -23,7 +23,7 @@ use dbx_core::{
     sql_risk::{
         classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
-    storage::McpGlobalPolicy,
+    storage::McpUserPolicy,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -174,7 +174,7 @@ pub struct McpScope {
 
 struct ResolvedConnection {
     connection: dbx_core::models::connection::ConnectionConfig,
-    policy: McpGlobalPolicy,
+    policy: McpUserPolicy,
 }
 
 impl McpScope {
@@ -495,7 +495,10 @@ impl DbxMcpServer {
         let safety = classify_command(&argv[0]);
         let permissions = mcp_permissions(connection, &resolved.policy);
         if safety != RedisCommandSafety::Allowed && resolved.policy.read_only {
-            return tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. Redis command blocked.");
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX MCP read-only mode is enabled for this account. Redis command blocked.",
+            );
         }
         if safety != RedisCommandSafety::Allowed && connection.read_only {
             return tool_error(
@@ -601,7 +604,7 @@ impl DbxMcpServer {
         if policy.read_only {
             return tool_error(
                 "MCP_READ_ONLY",
-                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+                "DBX MCP read-only mode is enabled for this account. Connection management is not allowed.",
             );
         }
         let connections = match self.backend.load_connections().await {
@@ -649,7 +652,7 @@ impl DbxMcpServer {
         if policy.read_only {
             return tool_error(
                 "MCP_READ_ONLY",
-                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+                "DBX MCP read-only mode is enabled for this account. Connection management is not allowed.",
             );
         }
         let connections = match self.backend.load_connections().await {
@@ -769,7 +772,7 @@ impl DbxMcpServer {
 
 impl DbxMcpServer {
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
-        let policy = self.backend.load_mcp_global_policy().await?;
+        let policy = self.backend.load_mcp_policy().await?;
         let connections = self.backend.load_connections().await?;
         Ok(connections
             .into_iter()
@@ -778,8 +781,8 @@ impl DbxMcpServer {
             .collect())
     }
 
-    async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
-        self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
+    async fn load_policy(&self) -> Result<McpUserPolicy, CallToolResult> {
+        self.backend.load_mcp_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -889,7 +892,7 @@ impl DbxMcpServer {
             if !policy_allows_connection(&policy, &connection) {
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
-                    "The DBX AI session scope is outside the global MCP connection allowlist.",
+                    "The DBX AI session scope is outside the MCP connection allowlist.",
                 ));
             }
             return Ok(ResolvedConnection { connection, policy });
@@ -965,7 +968,7 @@ fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
 }
 
 fn policy_allows_connection(
-    policy: &McpGlobalPolicy,
+    policy: &McpUserPolicy,
     connection: &dbx_core::models::connection::ConnectionConfig,
 ) -> bool {
     policy.allowed_connection_ids.as_ref().is_none_or(|allowed| allowed.iter().any(|id| id == &connection.id))
@@ -973,7 +976,7 @@ fn policy_allows_connection(
 
 fn mcp_permissions(
     connection: &dbx_core::models::connection::ConnectionConfig,
-    policy: &McpGlobalPolicy,
+    policy: &McpUserPolicy,
 ) -> dbx_core::agent_tools::AgentSqlPermissions {
     dbx_core::agent_tools::AgentSqlPermissions {
         allow_writes: !policy.read_only && !connection.read_only,
@@ -999,7 +1002,7 @@ fn normalize_confirmed_write_sql(value: Option<String>) -> Option<String> {
 #[allow(clippy::result_large_err)]
 fn validate_sql_policy(
     connection: &dbx_core::models::connection::ConnectionConfig,
-    policy: &McpGlobalPolicy,
+    policy: &McpUserPolicy,
     database: &str,
     sql: &str,
     allow_database_switch: bool,
@@ -1017,7 +1020,10 @@ fn validate_sql_policy(
     }
     let is_write = is_write_sql_for_database(sql, connection.db_type);
     if policy.read_only && is_write {
-        return Err(tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. SQL write blocked."));
+        return Err(tool_error(
+            "MCP_READ_ONLY",
+            "DBX MCP read-only mode is enabled for this account. SQL write blocked.",
+        ));
     }
     if connection.read_only && is_write {
         return Err(tool_error(
@@ -1050,7 +1056,7 @@ fn validate_sql_policy(
 #[allow(clippy::result_large_err)]
 fn validate_mongo_command(
     connection: &dbx_core::models::connection::ConnectionConfig,
-    policy: &McpGlobalPolicy,
+    policy: &McpUserPolicy,
     database: &str,
     source: &str,
 ) -> Result<MongoCommand, CallToolResult> {
@@ -1291,8 +1297,8 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
-        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-            Ok(McpGlobalPolicy::default())
+        async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
+            Ok(McpUserPolicy::default())
         }
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -1481,7 +1487,7 @@ mod tests {
     fn local_mongo_aggregate_cannot_write_to_a_production_database() {
         let mut mongo = connection("mongo", "mongo", "mongodb", "staging");
         mongo.production_databases = vec!["production".to_string()];
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let policy = McpUserPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
 
         let error = validate_mongo_command(
             &mongo,
@@ -1519,7 +1525,7 @@ mod tests {
 
         let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
         let writable_policy =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+            McpUserPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
         let read_only_error =
             validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions", false).unwrap_err();
         assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
@@ -1568,7 +1574,7 @@ mod tests {
 
         // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpUserPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
         let permissions = mcp_permissions(&connection, &policy);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
@@ -1592,7 +1598,7 @@ mod tests {
         // 4. Confirmed SQL must not bypass global read_only.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
         let read_only_policy =
-            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+            McpUserPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
@@ -1601,7 +1607,7 @@ mod tests {
     #[test]
     fn use_statements_require_a_session() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpUserPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
 
         let blocked = validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", false).unwrap_err();
         assert!(result_text(&blocked).contains("SQL_BLOCKED"));

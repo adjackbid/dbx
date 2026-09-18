@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
-use dbx_core::storage::McpGlobalPolicy;
+use dbx_core::storage::McpUserPolicy;
 
 const BIND_ADDR: &str = "127.0.0.1:0";
 const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
@@ -299,7 +299,7 @@ mod tests {
         resolve_connection, resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::{McpUserPolicy, Storage};
     use std::sync::Arc;
 
     fn mysql_config(read_only: bool) -> ConnectionConfig {
@@ -394,14 +394,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let storage = Storage::open(&root.join("storage.db")).await.unwrap();
         let mut config = mysql_config(false);
-        storage.save_connections(&[config.clone()]).await.unwrap();
+        storage.save_connections(&[config.clone()], "").await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
 
         let initial = resolve_connection(&state, Some(&config.id), &config.name).await.unwrap();
         assert!(!initial.read_only);
 
         config.read_only = true;
-        state.storage.save_connections(&[config.clone()]).await.unwrap();
+        state.storage.save_connections(&[config.clone()], "").await.unwrap();
         let refreshed = resolve_connection(&state, Some(&config.id), &config.name).await.unwrap();
         assert!(refreshed.read_only);
 
@@ -420,10 +420,10 @@ mod tests {
 
     #[test]
     fn mcp_allowlist_distinguishes_all_subset_and_none() {
-        let all = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let all = McpUserPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
         assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
 
-        let subset = McpGlobalPolicy {
+        let subset = McpUserPolicy {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["conn-1".to_string()]),
@@ -432,7 +432,7 @@ mod tests {
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
         let none =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: Some(Vec::new()) };
+            McpUserPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: Some(Vec::new()) };
         assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
     }
 
@@ -532,10 +532,10 @@ async fn resolve_connection(
     Ok(config.clone())
 }
 
-async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, String> {
+async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpUserPolicy, String> {
     state
         .storage
-        .load_mcp_global_policy()
+        .load_mcp_user_policy(dbx_core::storage::DESKTOP_ACCOUNT_ID)
         .await
         .map(|state| state.policy())
         .map_err(|error| mcp_policy_unavailable(error.to_string()))
@@ -549,7 +549,7 @@ fn mcp_policy_unavailable(error: String) -> String {
     }
 }
 
-fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), String> {
+fn ensure_connection_in_mcp_scope(policy: &McpUserPolicy, connection_id: &str) -> Result<(), String> {
     if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
         return Err(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"

@@ -156,9 +156,9 @@ Add to your `.mcp.json`:
 }
 ```
 
-Manage the connection allowlist and the **Read only**, **Data read/write**, and **Full access** modes in **DBX Settings → MCP**. The machine-readable values remain `read_only`, `safe_write`, and `high_risk_write`; client configs do not need permission or connection-scope environment variables.
+Manage the connection allowlist and the **Read only**, **Data read/write**, and **Full access** modes in **DBX Settings → MCP**. Each account keeps its own connection allowlist and execution mode, so an MCP client always uses the policy of the account it authenticated as. The machine-readable values remain `read_only`, `safe_write`, and `high_risk_write`; client configs do not need permission or connection-scope environment variables.
 
-For upgrade compatibility, an existing `DBX_MCP_ALLOW_WRITES=0` (or `false`) remains a read-only restriction only until a central MCP policy is saved for the first time; it can never enable writes or override a saved policy.
+For upgrade compatibility, an existing `DBX_MCP_ALLOW_WRITES=0` (or `false`) remains a read-only restriction only until an account MCP policy is saved for the first time; it can never enable writes or override a saved policy.
 
 Windows portable builds need `DBX_DATA_DIR` in the MCP config, pointing to the `data` directory next to `DBX.exe` (the folder that contains `dbx.db`).
 
@@ -386,6 +386,7 @@ The installer will be in `src-tauri/target/release/bundle/`.
 - [Database Test Lab](https://dbxio.com/en/docs/database-lab) — local database recipes for development and verification
 - [Contributing](CONTRIBUTING.md) — how to pick up issues and open PRs
 - [Web API reference](docs/content/docs/web-api.mdx) — HTTP API for Docker/Web deployments
+- [Windows/IIS deployment](deploy/iis/README.md) — run DBX Web as a native Windows binary behind IIS, without Docker
 - [Examples](examples/) — CLI, MCP, Docker, and API samples
 
 ## Community

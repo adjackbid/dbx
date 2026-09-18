@@ -84,7 +84,7 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain('@update:allowed-connection-ids="onMcpAllowedConnectionIdsChange"');
 
     const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
-    const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");
+    const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpUserPolicy(true);");
     const loadingEnd = settingsDialogSource.indexOf("mcpPolicyLoading.value = false;", policyLoad);
     expect(loadingStart).toBeGreaterThan(-1);
     expect(loadingStart).toBeLessThan(policyLoad);

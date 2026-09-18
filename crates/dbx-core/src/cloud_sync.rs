@@ -18,7 +18,7 @@ use crate::connection_secrets::{
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
-use crate::storage::{DesktopSettings, SnippetPendingCleanup, Storage};
+use crate::storage::{DesktopSettings, SnippetPendingCleanup, Storage, DESKTOP_ACCOUNT_ID};
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const ENCRYPTED_SNIPPET_SNAPSHOT_FORMAT: &str = "dbx-encrypted-sync-snapshot";
@@ -247,7 +247,7 @@ pub async fn build_sync_snapshot(
     secrets_passphrase: Option<&str>,
 ) -> Result<SyncSnapshot, String> {
     let mut connections = storage.load_all_connections().await?;
-    let mut tunnel_profiles = storage.load_tunnel_profiles().await?;
+    let mut tunnel_profiles = storage.load_tunnel_profiles(DESKTOP_ACCOUNT_ID).await?;
     let encrypted_secrets = match normalized_passphrase(secrets_passphrase) {
         Some(passphrase) => Some(encrypt_sensitive_payload(
             &build_sensitive_payload(storage, &connections, &tunnel_profiles).await?,
@@ -330,7 +330,7 @@ pub async fn apply_sync_snapshot(
 
     storage.save_connection_metadata_preserving_secrets(&connections, "").await?;
     if let Some(profiles) = &snapshot.tunnel_profiles {
-        storage.save_tunnel_profiles_preserving_secrets(profiles).await?;
+        storage.save_tunnel_profiles_preserving_secrets(profiles, DESKTOP_ACCOUNT_ID).await?;
     }
     if let Some(layout) = &snapshot.sidebar_layout {
         storage.save_sidebar_layout(layout).await?;
@@ -1200,7 +1200,7 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
         storage.save_ai_configs(&[item], "").await?;
     }
     if let Some(profiles) = &payload.tunnel_profiles {
-        storage.save_tunnel_profiles(profiles).await?;
+        storage.save_tunnel_profiles(profiles, DESKTOP_ACCOUNT_ID).await?;
     }
     Ok(())
 }
@@ -2436,7 +2436,7 @@ mod tests {
             allow_exec_channel_proxy: false,
             profile_id: String::new(),
         });
-        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile), "").await.unwrap();
 
         let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
 
@@ -2454,7 +2454,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![profile]);
+        assert_eq!(target.load_tunnel_profiles("").await.unwrap(), vec![profile]);
     }
 
     // ---- AI configs sync tests ----
@@ -2481,7 +2481,7 @@ mod tests {
 
         // Pre-populate with a config
         let cfg = make_test_config("to-be-cleared", true);
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
         // Some([]) — explicit clear
         let payload = SensitiveSyncPayload {
@@ -2536,8 +2536,8 @@ mod tests {
     #[tokio::test]
     async fn sensitive_payload_legacy_ai_config_replaces_local_configs_with_same_name() {
         let storage = Storage::open(&temp_db_path("ai-cfg-legacy-replace")).await.unwrap();
-        storage.save_ai_config_item(&make_test_config("openai", true)).await.unwrap();
-        storage.save_ai_config_item(&make_test_config("local-only", false)).await.unwrap();
+        storage.save_ai_config_item(&make_test_config("openai", true), "").await.unwrap();
+        storage.save_ai_config_item(&make_test_config("local-only", false), "").await.unwrap();
 
         let mut legacy_config = make_test_config("unused", true).config;
         legacy_config.model = "snapshot-model".to_string();

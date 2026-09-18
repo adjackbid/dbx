@@ -541,7 +541,7 @@ mod tests {
         AttachedDatabaseConfig, ConnectionConfig, DatabaseConnectionInfo, DatabaseType, ProxyTunnelConfig, ProxyType,
         TransportLayerConfig,
     };
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::{McpUserPolicy, Storage};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -635,6 +635,80 @@ mod tests {
         config
     }
 
+    fn test_session() -> crate::state::UserSession {
+        crate::state::UserSession {
+            user_id: String::new(),
+            username: "tester".to_string(),
+            display_name: "Tester".to_string(),
+            is_admin: true,
+            auth_source: dbx_core::user::AuthSource::Local,
+            created_at: 0,
+            last_accessed_at: 0,
+        }
+    }
+
+    fn mcp_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-dbx-mcp-request", axum::http::HeaderValue::from_static("1"));
+        headers
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_and_write_level_follow_the_owning_account() {
+        use crate::routes::mcp_policy::{ensure_scope, ensure_write};
+
+        let (state, dir) = test_web_state().await;
+        let connection_a = sqlite_config("conn-a", &dir.join("a.db").to_string_lossy());
+        let connection_b = sqlite_config("conn-b", &dir.join("b.db").to_string_lossy());
+        let extra_a = sqlite_config("conn-a-extra", &dir.join("a-extra.db").to_string_lossy());
+        state.app.storage.save_connections(&[connection_a.clone(), extra_a.clone()], "user-a").await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection_b), "user-b").await.unwrap();
+
+        // Account B locks its own connection down to read-only.
+        state
+            .app
+            .storage
+            .save_mcp_user_policy(
+                "user-b",
+                &McpUserPolicy {
+                    read_only: true,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![connection_b.id.clone()]),
+                },
+            )
+            .await
+            .unwrap();
+        // Account A only exposes one of its two connections.
+        state
+            .app
+            .storage
+            .save_mcp_user_policy(
+                "user-a",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![connection_a.id.clone()]),
+                },
+            )
+            .await
+            .unwrap();
+
+        let headers = mcp_headers();
+        assert!(ensure_scope(&state, &headers, &connection_a.id).await.is_ok());
+        assert!(ensure_write(&state, &headers, &connection_a.id, "main", "Insert").await.is_ok());
+        let out_of_scope = ensure_scope(&state, &headers, &extra_a.id).await.unwrap_err();
+        assert!(out_of_scope.message.starts_with("CONNECTION_OUT_OF_SCOPE:"), "{}", out_of_scope.message);
+
+        // Account B's read-only policy applies to account B's connection only.
+        let read_only = ensure_write(&state, &headers, &connection_b.id, "main", "Insert").await.unwrap_err();
+        assert!(read_only.message.starts_with("MCP_READ_ONLY:"), "{}", read_only.message);
+
+        // Unknown connections fail closed instead of falling back to a default policy.
+        assert!(ensure_scope(&state, &headers, "missing").await.is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn mongo_legacy_marker_updates_only_mongodb_profiles() {
         let mut mongo = sqlite_config("mongo", "");
@@ -656,7 +730,7 @@ mod tests {
         let mut mongo = sqlite_config("mongo", "");
         mongo.db_type = DatabaseType::MongoDb;
         let other = sqlite_config("other", ":memory:");
-        state.app.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+        state.app.storage.save_connections(&[mongo.clone(), other.clone()], "").await.unwrap();
         let mut current = mongo.clone();
         current.note = "Updated while connecting".to_string();
         state.app.configs.write().await.insert(current.id.clone(), current);
@@ -667,7 +741,7 @@ mod tests {
         assert_eq!(runtime.note, "Updated while connecting");
         assert_eq!(runtime.driver_profile.as_deref(), Some("mongodb-legacy"));
         assert_eq!(runtime.driver_label.as_deref(), Some("MongoDB (Legacy)"));
-        let saved = state.app.storage.load_connections().await.unwrap();
+        let saved = state.app.storage.load_connections("").await.unwrap();
         assert_eq!(saved.len(), 2);
         assert_eq!(
             saved.iter().find(|config| config.id == mongo.id).and_then(|config| config.driver_profile.as_deref()),
@@ -683,18 +757,18 @@ mod tests {
         let (state, dir) = test_web_state().await;
         let mut original = sqlite_config("mongo", "");
         original.db_type = DatabaseType::MongoDb;
-        state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&original), "").await.unwrap();
 
         let mut replacement = original.clone();
         replacement.host = "replacement.example.com".to_string();
         replacement.name = "Replacement MongoDB".to_string();
-        state.app.storage.save_connections(std::slice::from_ref(&replacement)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&replacement), "").await.unwrap();
         state.app.configs.write().await.insert(replacement.id.clone(), replacement.clone());
 
         apply_mongo_legacy_driver_profile(&state, &original).await.unwrap();
 
         assert_eq!(state.app.configs.read().await.get(&replacement.id), Some(&replacement));
-        assert_eq!(state.app.storage.load_connections().await.unwrap(), vec![replacement]);
+        assert_eq!(state.app.storage.load_connections("").await.unwrap(), vec![replacement]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -894,9 +968,12 @@ mod tests {
         let db_path = dir.join("app.db");
         let config = sqlite_config("sqlite-conn", &db_path.to_string_lossy());
 
-        let result =
-            save_connections(State(state.clone()), Json(SaveConnectionsRequest { configs: vec![config.clone()] }))
-                .await;
+        let result = save_connections(
+            State(state.clone()),
+            axum::extract::Extension(test_session()),
+            Json(SaveConnectionsRequest { configs: vec![config.clone()] }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;
@@ -909,27 +986,34 @@ mod tests {
     async fn mcp_connection_routes_preserve_unrelated_concurrent_changes() {
         let (state, dir) = test_web_state().await;
         let mut existing = sqlite_config("existing", &dir.join("before.db").to_string_lossy());
-        state.app.storage.save_connections(std::slice::from_ref(&existing)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&existing), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: Some(vec![existing.id.clone()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![existing.id.clone()]),
+                },
+            )
             .await
             .unwrap();
 
         // Simulate a Web UI edit after the MCP client last observed the list.
         existing.host = dir.join("after.db").to_string_lossy().into_owned();
-        state.app.storage.save_connections(std::slice::from_ref(&existing)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&existing), "").await.unwrap();
         let added = sqlite_config("added", &dir.join("added.db").to_string_lossy());
-        let result =
-            mcp_add_connection(State(state.clone()), Json(McpAddConnectionRequest { config: added.clone() })).await;
+        let result = mcp_add_connection(
+            State(state.clone()),
+            axum::extract::Extension(test_session()),
+            Json(McpAddConnectionRequest { config: added.clone() }),
+        )
+        .await;
         assert!(result.is_ok());
 
-        let persisted = state.app.storage.load_connections().await.unwrap();
+        let persisted = state.app.storage.load_connections("").await.unwrap();
         assert_eq!(persisted.len(), 2);
         assert_eq!(
             persisted.iter().find(|config| config.id == existing.id).map(|config| config.host.as_str()),
@@ -946,29 +1030,34 @@ mod tests {
         let (state, dir) = test_web_state().await;
         let kept = sqlite_config("kept", &dir.join("kept.db").to_string_lossy());
         let removed = sqlite_config("removed", &dir.join("removed.db").to_string_lossy());
-        state.app.storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
+        state.app.storage.save_connections(&[kept.clone(), removed.clone()], "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: Some(vec![removed.id.clone()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![removed.id.clone()]),
+                },
+            )
             .await
             .unwrap();
 
         let removed_result = mcp_remove_connection(
             State(state.clone()),
+            axum::extract::Extension(test_session()),
             Json(McpRemoveConnectionRequest { connection_id: removed.id.clone() }),
         )
         .await
         .unwrap_or_else(|error| panic!("{}", error.message));
         assert!(removed_result.0);
-        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].id, kept.id);
+        assert_eq!(state.app.storage.load_connections("").await.unwrap()[0].id, kept.id);
 
         let scope_error = mcp_remove_connection(
             State(state.clone()),
+            axum::extract::Extension(test_session()),
             Json(McpRemoveConnectionRequest { connection_id: kept.id.clone() }),
         )
         .await
@@ -978,15 +1067,15 @@ mod tests {
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: true,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: None,
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            )
             .await
             .unwrap();
         let read_only_error = mcp_add_connection(
             State(state.clone()),
+            axum::extract::Extension(test_session()),
             Json(McpAddConnectionRequest { config: sqlite_config("new", &dir.join("new.db").to_string_lossy()) }),
         )
         .await
@@ -1000,7 +1089,7 @@ mod tests {
     async fn save_connection_database_info_preserves_connected_pool() {
         let (state, dir) = test_web_state().await;
         let config = mq_config("mq-info", "http://127.0.0.1:8080");
-        state.app.storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&config), "").await.unwrap();
         state.app.configs.write().await.insert(config.id.clone(), config.clone());
         state.app.connections.write().await.insert(config.id.clone(), PoolKind::MessageQueue);
         let database_info = DatabaseConnectionInfo {
@@ -1011,6 +1100,7 @@ mod tests {
 
         let result = save_connection_database_info(
             State(state.clone()),
+            axum::extract::Extension(test_session()),
             Json(SaveConnectionDatabaseInfoRequest {
                 connection_id: config.id.clone(),
                 database_info: Some(database_info.clone()),
@@ -1021,7 +1111,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.app.connections.read().await.contains_key(&config.id));
         assert_eq!(state.app.configs.read().await[&config.id].database_info, Some(database_info.clone()));
-        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].database_info, Some(database_info));
+        assert_eq!(state.app.storage.load_connections("").await.unwrap()[0].database_info, Some(database_info));
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1036,9 +1126,12 @@ mod tests {
         let first = state.app.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        let result =
-            save_connections(State(state.clone()), Json(SaveConnectionsRequest { configs: vec![updated.clone()] }))
-                .await;
+        let result = save_connections(
+            State(state.clone()),
+            axum::extract::Extension(test_session()),
+            Json(SaveConnectionsRequest { configs: vec![updated.clone()] }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let cached_admin_url = state
@@ -1086,11 +1179,11 @@ mod tests {
         let (state, dir) = test_web_state().await;
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        state.app.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&updated), "").await.unwrap();
         state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.app.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
 
-        let result = load_connections(State(state.clone())).await;
+        let result = load_connections(State(state.clone()), axum::extract::Extension(test_session())).await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;
@@ -1119,8 +1212,12 @@ mod tests {
         }
         let stale = state.app.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
-        let result =
-            save_connections(State(state.clone()), Json(SaveConnectionsRequest { configs: vec![kept.clone()] })).await;
+        let result = save_connections(
+            State(state.clone()),
+            axum::extract::Extension(test_session()),
+            Json(SaveConnectionsRequest { configs: vec![kept.clone()] }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;
@@ -1147,8 +1244,12 @@ mod tests {
         }
         state.app.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
 
-        let result =
-            save_connections(State(state.clone()), Json(SaveConnectionsRequest { configs: vec![kept.clone()] })).await;
+        let result = save_connections(
+            State(state.clone()),
+            axum::extract::Extension(test_session()),
+            Json(SaveConnectionsRequest { configs: vec![kept.clone()] }),
+        )
+        .await;
         assert!(result.is_ok());
 
         assert!(!state.app.connections.read().await.contains_key(&removed.id));

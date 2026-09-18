@@ -915,7 +915,7 @@ mod tests {
     };
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
-    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use dbx_core::storage::{McpUserPolicy, Storage};
     use std::sync::Arc;
 
     fn mongo_config(is_production: bool) -> ConnectionConfig {
@@ -952,14 +952,14 @@ mod tests {
     async fn find_one_writes_recheck_policy_filter_production_and_allowlist() {
         let (state, dir) = test_web_state().await;
         let connection = mongo_config(false);
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         let headers = mcp_headers();
-        let writable_policy = McpGlobalPolicy {
+        let writable_policy = McpUserPolicy {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec![connection.id.clone()]),
         };
-        state.app.storage.save_mcp_global_policy(&writable_policy).await.unwrap();
+        state.app.storage.save_mcp_user_policy("", &writable_policy).await.unwrap();
 
         assert!(ensure_find_one_write_policy(&state, &headers, &connection.id, "app", r#"{"_id":1}"#, "Update")
             .await
@@ -968,7 +968,7 @@ mod tests {
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..writable_policy.clone() })
+            .save_mcp_user_policy("", &McpUserPolicy { read_only: true, ..writable_policy.clone() })
             .await
             .unwrap();
         let revoked = ensure_find_one_write_policy(&state, &headers, &connection.id, "app", r#"{"_id":1}"#, "Update")
@@ -976,7 +976,7 @@ mod tests {
             .unwrap_err();
         assert!(revoked.message.starts_with("MCP_READ_ONLY:"), "{}", revoked.message);
 
-        state.app.storage.save_mcp_global_policy(&writable_policy).await.unwrap();
+        state.app.storage.save_mcp_user_policy("", &writable_policy).await.unwrap();
         let empty_filter =
             ensure_find_one_write_policy(&state, &headers, &connection.id, "app", "{}", "Delete").await.unwrap_err();
         assert!(empty_filter.message.starts_with("SQL_BLOCKED:"), "{}", empty_filter.message);
@@ -984,27 +984,30 @@ mod tests {
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy { allow_dangerous_sql: true, ..writable_policy.clone() })
+            .save_mcp_user_policy("", &McpUserPolicy { allow_dangerous_sql: true, ..writable_policy.clone() })
             .await
             .unwrap();
         assert!(ensure_find_one_write_policy(&state, &headers, &connection.id, "app", "{}", "Replace").await.is_ok());
 
-        state.app.storage.save_connections(&[mongo_config(true)]).await.unwrap();
+        state.app.storage.save_connections(&[mongo_config(true)], "").await.unwrap();
         let production =
             ensure_find_one_write_policy(&state, &headers, &connection.id, "app", r#"{"_id":1}"#, "Update")
                 .await
                 .unwrap_err();
         assert!(production.message.starts_with("PRODUCTION_DATABASE_READ_ONLY:"), "{}", production.message);
 
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: true,
-                allowed_connection_ids: Some(vec!["different-connection".to_string()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: true,
+                    allowed_connection_ids: Some(vec!["different-connection".to_string()]),
+                },
+            )
             .await
             .unwrap();
         let allowlist = ensure_find_one_write_policy(&state, &headers, &connection.id, "app", r#"{"_id":1}"#, "Delete")
@@ -1020,15 +1023,18 @@ mod tests {
     async fn drop_database_requires_mcp_dangerous_write_approval() {
         let (state, dir) = test_web_state().await;
         let connection = mongo_config(false);
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: Some(vec![connection.id.clone()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![connection.id.clone()]),
+                },
+            )
             .await
             .unwrap();
 
@@ -1049,15 +1055,18 @@ mod tests {
     async fn clone_collection_requires_mcp_dangerous_write_approval() {
         let (state, dir) = test_web_state().await;
         let connection = mongo_config(false);
-        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state.app.storage.save_connections(std::slice::from_ref(&connection), "").await.unwrap();
         state
             .app
             .storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: Some(vec![connection.id.clone()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![connection.id.clone()]),
+                },
+            )
             .await
             .unwrap();
 

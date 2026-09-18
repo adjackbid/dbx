@@ -28,12 +28,19 @@ const STORAGE_DB_FILE_NAME: &str = "dbx.db";
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
-const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
+const LEGACY_MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
+const MCP_USER_POLICY_SETTING_KEY: &str = "mcp_policy";
+const AI_CHAT_SELECTION_SETTING_KEY: &str = "ai_chat_selection";
+const AI_GLOBAL_INSTRUCTIONS_SETTING_KEY: &str = "ai_global_custom_instructions";
 const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
 const SNIPPET_PENDING_CLEANUPS_KEY: &str = "snippet_pending_legacy_cleanups";
+
+/// The desktop build stores all of its local data under the empty account id,
+/// matching the Tauri commands and the desktop connection store.
+pub const DESKTOP_ACCOUNT_ID: &str = "";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -207,9 +214,13 @@ pub struct DesktopSettings {
     pub sidebar_table_page_size: usize,
 }
 
+/// MCP connection scope and execution permission of a single account.
+///
+/// Connections belong to an account, so both `allowed_connection_ids` and the
+/// write level only ever apply to connections owned by the same account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct McpGlobalPolicy {
+pub struct McpUserPolicy {
     pub read_only: bool,
     #[serde(default)]
     pub allow_dangerous_sql: bool,
@@ -218,19 +229,28 @@ pub struct McpGlobalPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpGlobalPolicyState {
+pub struct McpUserPolicyState {
     pub configured: bool,
     pub read_only: bool,
     pub allow_dangerous_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
 }
 
-impl McpGlobalPolicyState {
-    pub fn policy(&self) -> McpGlobalPolicy {
-        McpGlobalPolicy {
+impl McpUserPolicyState {
+    pub fn policy(&self) -> McpUserPolicy {
+        McpUserPolicy {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
+        }
+    }
+
+    fn from_policy(policy: &McpUserPolicy, configured: bool) -> Self {
+        Self {
+            configured,
+            read_only: policy.read_only,
+            allow_dangerous_sql: policy.allow_dangerous_sql,
+            allowed_connection_ids: policy.allowed_connection_ids.clone(),
         }
     }
 }
@@ -419,7 +439,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS prompt_templates (
         id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
         content TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
@@ -484,6 +504,10 @@ impl Storage {
             ensure_state_store_columns_sync(conn)?;
             ensure_user_id_columns_sync(conn)?;
             migrate_legacy_password_to_admin_user(conn)?;
+            migrate_legacy_mcp_policy_to_user_policy(conn)?;
+            migrate_prompt_template_name_uniqueness(conn)?;
+            migrate_legacy_user_scoped_rows(conn)?;
+            migrate_legacy_ai_state_to_user_settings(conn)?;
             Ok(())
         })
     }
@@ -762,6 +786,186 @@ fn migrate_legacy_password_to_admin_user(conn: &Connection) -> Result<(), String
     }
 
     Ok(())
+}
+
+/// Move the single pre-per-account MCP policy into the account that owned it.
+///
+/// Older builds stored one MCP connection scope and write level for the whole
+/// instance. That setting cannot be split automatically, so it is handed to the
+/// account that most likely configured it — the desktop scope when the local
+/// data still belongs to the empty user id, otherwise the first admin. Every
+/// other account starts from the documented default instead of inheriting a
+/// connection allowlist that references somebody else's connections.
+fn migrate_legacy_mcp_policy_to_user_policy(conn: &Connection) -> Result<(), String> {
+    let Some(legacy) = take_legacy_mcp_policy(conn)? else {
+        return Ok(());
+    };
+    let owner = legacy_scope_owner(conn)?;
+
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_settings WHERE user_id = ?1 AND key = ?2",
+            params![owner, MCP_USER_POLICY_SETTING_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if existing.is_none() {
+        let json = serde_json::to_string(&legacy).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?1, ?2, ?3)",
+            params![owner, MCP_USER_POLICY_SETTING_KEY, json],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Assigns the remaining instance-wide rows of user-scoped tables to the
+/// account that owned them before multi-account mode. Non-owning accounts must
+/// never inherit another account's catalog or AI credentials.
+fn migrate_legacy_user_scoped_rows(conn: &Connection) -> Result<(), String> {
+    let owner = legacy_scope_owner(conn)?;
+    if owner.is_empty() {
+        // Desktop keeps its local rows under the empty account id.
+        return Ok(());
+    }
+    for table in ["ai_config", "ai_provider_configs", "prompt_templates", "tunnel_profiles"] {
+        let sql = format!("UPDATE {table} SET user_id = ?1 WHERE user_id = '' OR user_id IS NULL");
+        conn.execute(&sql, params![owner]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Moves the instance-wide AI selection and global instructions out of
+/// `app_state` into the owning account's settings.
+fn migrate_legacy_ai_state_to_user_settings(conn: &Connection) -> Result<(), String> {
+    let owner = legacy_scope_owner(conn)?;
+    let migrations = [
+        (APP_STATE_AI_CHAT_SELECTION_KEY, AI_CHAT_SELECTION_SETTING_KEY, false),
+        (APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY, AI_GLOBAL_INSTRUCTIONS_SETTING_KEY, true),
+    ];
+    for (legacy_key, user_key, plain_string) in migrations {
+        let value: Option<String> = conn
+            .query_row("SELECT value_json FROM app_state WHERE key = ?1", [legacy_key], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(value) = value else { continue };
+        let stored = if plain_string {
+            match serde_json::from_str::<serde_json::Value>(&value) {
+                Ok(serde_json::Value::String(text)) => text,
+                Ok(other) => other.to_string(),
+                // Leave unreadable legacy values alone instead of dropping them.
+                Err(_) => continue,
+            }
+        } else {
+            value
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, key, value) VALUES (?1, ?2, ?3)",
+            params![owner, user_key, stored],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM app_state WHERE key = ?1", [legacy_key]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Read and remove the legacy instance-wide MCP policy. A policy that can no
+/// longer be parsed keeps the previous fail-closed behaviour for the owning
+/// account instead of silently widening its write permissions.
+fn take_legacy_mcp_policy(conn: &Connection) -> Result<Option<McpUserPolicy>, String> {
+    let settings_json: Option<String> = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(settings_json) = settings_json else {
+        return Ok(None);
+    };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&settings_json) else {
+        return Ok(None);
+    };
+    let Some(value) = settings.remove(LEGACY_MCP_GLOBAL_POLICY_KEY) else {
+        return Ok(None);
+    };
+
+    let policy = match serde_json::from_value::<McpUserPolicy>(value) {
+        Ok(policy) => policy,
+        Err(error) => {
+            warn!("Ignoring unreadable legacy MCP policy ({error}); keeping the owning account read-only");
+            McpUserPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None }
+        }
+    };
+
+    let updated = serde_json::Value::Object(settings).to_string();
+    conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [updated])
+        .map_err(|e| e.to_string())?;
+    Ok(Some(policy))
+}
+
+/// The account that owned the instance-wide data before multi-account mode:
+/// the desktop scope while the local data still belongs to the empty account
+/// id, otherwise the first admin (or the first account as a fallback).
+fn legacy_scope_owner(conn: &Connection) -> Result<String, String> {
+    let desktop_owns_data: bool = conn
+        .query_row("SELECT EXISTS (SELECT 1 FROM connections WHERE user_id = '')", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if desktop_owns_data {
+        return Ok(String::new());
+    }
+    if let Some(admin_id) = conn
+        .query_row("SELECT id FROM users WHERE is_admin = 1 ORDER BY created_at ASC, id ASC LIMIT 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(admin_id);
+    }
+    Ok(conn
+        .query_row("SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default())
+}
+
+/// Template names only have to be unique inside one account now that each
+/// account keeps its own prompt library. SQLite cannot drop the original
+/// table-wide `UNIQUE`, so rebuild the table once when it is still present.
+fn migrate_prompt_template_name_uniqueness(conn: &Connection) -> Result<(), String> {
+    let ddl: Option<String> = conn
+        .query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prompt_templates'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(ddl) = ddl else {
+        return Ok(());
+    };
+    if !ddl.to_uppercase().contains("UNIQUE") {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE prompt_templates_scoped (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             content TEXT NOT NULL DEFAULT '',
+             created_at TEXT NOT NULL DEFAULT '',
+             updated_at TEXT NOT NULL DEFAULT '',
+             user_id TEXT NOT NULL DEFAULT ''
+         );
+         INSERT INTO prompt_templates_scoped (id, name, content, created_at, updated_at, user_id)
+             SELECT id, name, content, created_at, updated_at, COALESCE(user_id, '')
+             FROM prompt_templates;
+         DROP TABLE prompt_templates;
+         ALTER TABLE prompt_templates_scoped RENAME TO prompt_templates;
+         CREATE INDEX IF NOT EXISTS idx_prompt_templates_user ON prompt_templates (user_id);
+         COMMIT;",
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn ssh_tunnel_secret_segment(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
@@ -1402,28 +1606,44 @@ fn ai_provider_from_key(provider: &str) -> Result<AiProvider, String> {
 }
 
 impl Storage {
-    pub async fn save_ai_config(&self, config: &AiConfig) -> Result<(), String> {
+    pub async fn save_ai_config(&self, config: &AiConfig, user_id: &str) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            conn.execute("DELETE FROM ai_config WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO ai_config (id, config_json, user_id) \
+                 VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM ai_config), ?1, ?2)",
+                params![json, user_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })
         .await
     }
 
-    pub async fn load_ai_config(&self) -> Result<Option<AiConfig>, String> {
+    pub async fn load_ai_config(&self, user_id: &str) -> Result<Option<AiConfig>, String> {
+        let user_id = user_id.to_string();
         let json: Option<String> = self
-            .with_conn(|conn| {
-                conn.query_row("SELECT config_json FROM ai_config WHERE id = 1", [], |row| row.get(0))
-                    .optional()
-                    .map_err(|e| e.to_string())
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT config_json FROM ai_config WHERE user_id = ?1 ORDER BY id LIMIT 1",
+                    [&user_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
     }
 
-    pub async fn save_ai_provider_config(&self, provider: &str, config: &AiConfig) -> Result<(), String> {
+    pub async fn save_ai_provider_config(
+        &self,
+        provider: &str,
+        config: &AiConfig,
+        user_id: &str,
+    ) -> Result<(), String> {
         let parsed_provider = ai_provider_from_key(provider)?;
         let mut config = config.clone();
         let config_provider = ai_provider_key(&config.provider);
@@ -1435,11 +1655,14 @@ impl Storage {
             config.provider = parsed_provider;
         }
         let provider = provider.to_string();
+        let user_id = user_id.to_string();
         let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
+            conn.execute("DELETE FROM ai_provider_configs WHERE user_id = ?1", [&user_id])
+                .map_err(|e| e.to_string())?;
             conn.execute(
-                "INSERT OR REPLACE INTO ai_provider_configs (provider, config_json) VALUES (?1, ?2)",
-                params![provider, json],
+                "INSERT OR REPLACE INTO ai_provider_configs (provider, config_json, user_id) VALUES (?1, ?2, ?3)",
+                params![provider, json, user_id],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -1447,13 +1670,14 @@ impl Storage {
         .await
     }
 
-    pub async fn load_ai_provider_configs(&self) -> Result<HashMap<String, AiConfig>, String> {
-        self.with_conn(|conn| {
+    pub async fn load_ai_provider_configs(&self, user_id: &str) -> Result<HashMap<String, AiConfig>, String> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT provider, config_json FROM ai_provider_configs")
+                .prepare("SELECT provider, config_json FROM ai_provider_configs WHERE user_id = ?1")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([&user_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                 .map_err(|e| e.to_string())?;
             let mut map = HashMap::new();
             for row in rows {
@@ -1488,6 +1712,10 @@ impl Storage {
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM ai_configs WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
+            // Clear the pre-multi-config AI tables for this account so the one-time
+            // legacy migration cannot re-import them on the next restart.
+            tx.execute("DELETE FROM ai_config WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_provider_configs WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
             for config in &configs {
                 let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
                 let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
@@ -1632,7 +1860,10 @@ impl Storage {
 // `connection_secrets` in the same database file.
 
 impl Storage {
-    pub async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
+    /// Load every tunnel profile regardless of owner. Only used to resolve a
+    /// `profile_id` reference when connecting: profile ids are globally unique,
+    /// and the settings catalog still lists the caller's own profiles only.
+    pub async fn load_all_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
         let rows: Vec<String> = self
             .with_conn(|conn| {
                 let mut stmt = conn
@@ -1642,32 +1873,39 @@ impl Storage {
                 rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
             })
             .await?;
-
-        let mut profiles = Vec::new();
-        for json in rows {
-            match serde_json::from_str::<TransportLayerConfig>(&json) {
-                Ok(profile) => profiles.push(profile),
-                Err(e) => warn!("Failed to deserialize tunnel profile: {}", e),
-            }
-        }
-        Ok(profiles)
+        Ok(deserialize_tunnel_profiles(rows))
     }
 
-    pub async fn save_tunnel_profiles(&self, profiles: &[TransportLayerConfig]) -> Result<(), String> {
+    pub async fn load_tunnel_profiles(&self, user_id: &str) -> Result<Vec<TransportLayerConfig>, String> {
+        let user_id = user_id.to_string();
+        let rows: Vec<String> = self
+            .with_conn(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT config_json FROM tunnel_profiles WHERE user_id = ?1 ORDER BY rowid")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([&user_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            })
+            .await?;
+        Ok(deserialize_tunnel_profiles(rows))
+    }
+
+    pub async fn save_tunnel_profiles(&self, profiles: &[TransportLayerConfig], user_id: &str) -> Result<(), String> {
         for profile in profiles {
             if profile.id().trim().is_empty() {
                 return Err("Tunnel profile id must not be empty".to_string());
             }
         }
         let profiles = profiles.to_vec();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM tunnel_profiles WHERE user_id = ?1", [&user_id]).map_err(|e| e.to_string())?;
             for profile in &profiles {
                 let json = serde_json::to_string(profile).map_err(|e| e.to_string())?;
                 tx.execute(
-                    "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2)",
-                    params![profile.id(), json],
+                    "INSERT INTO tunnel_profiles (id, config_json, user_id) VALUES (?1, ?2, ?3)",
+                    params![profile.id(), json, user_id],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1683,9 +1921,10 @@ impl Storage {
     pub async fn save_tunnel_profiles_preserving_secrets(
         &self,
         profiles: &[TransportLayerConfig],
+        user_id: &str,
     ) -> Result<(), String> {
         let existing: HashMap<String, TransportLayerConfig> =
-            self.load_tunnel_profiles().await?.into_iter().map(|p| (p.id().to_string(), p)).collect();
+            self.load_tunnel_profiles(user_id).await?.into_iter().map(|p| (p.id().to_string(), p)).collect();
         let merged: Vec<TransportLayerConfig> = profiles
             .iter()
             .map(|profile| {
@@ -1696,8 +1935,19 @@ impl Storage {
                 profile
             })
             .collect();
-        self.save_tunnel_profiles(&merged).await
+        self.save_tunnel_profiles(&merged, user_id).await
     }
+}
+
+fn deserialize_tunnel_profiles(rows: Vec<String>) -> Vec<TransportLayerConfig> {
+    let mut profiles = Vec::new();
+    for json in rows {
+        match serde_json::from_str::<TransportLayerConfig>(&json) {
+            Ok(profile) => profiles.push(profile),
+            Err(e) => warn!("Failed to deserialize tunnel profile: {}", e),
+        }
+    }
+    profiles
 }
 
 fn merge_missing_tunnel_profile_secrets(profile: &mut TransportLayerConfig, previous: &TransportLayerConfig) {
@@ -1756,7 +2006,7 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY];
+            let dedicated_keys = [MAX_RETRIES_KEY];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -1788,66 +2038,59 @@ impl Storage {
         Ok(settings.get("password_hash").and_then(|v| v.as_str()).map(|s| s.to_string()))
     }
 
-    pub async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicyState, String> {
+    /// Load the MCP policy of a single account. Every account owns its own
+    /// connection scope and execution permission, so MCP clients only ever see
+    /// the connections and write level of the account they authenticated as.
+    pub async fn load_mcp_user_policy(&self, user_id: &str) -> Result<McpUserPolicyState, String> {
+        let user_id = user_id.to_string();
         let result = self
-            .with_conn(|conn| {
-                let json: Option<String> = conn
-                    .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+            .with_conn(move |conn| {
+                let stored: Option<String> = conn
+                    .query_row(
+                        "SELECT value FROM user_settings WHERE user_id = ?1 AND key = ?2",
+                        params![user_id, MCP_USER_POLICY_SETTING_KEY],
+                        |row| row.get(0),
+                    )
                     .optional()
                     .map_err(|e| e.to_string())?;
-                let Some(json) = json else {
-                    let policy = McpGlobalPolicy::default();
-                    return Ok(McpGlobalPolicyState {
-                        configured: false,
-                        read_only: policy.read_only,
-                        allow_dangerous_sql: policy.allow_dangerous_sql,
-                        allowed_connection_ids: policy.allowed_connection_ids,
-                    });
-                };
-                let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
-                    .map_err(|e| format!("invalid app settings JSON: {e}"))?;
-                let Some(value) = settings.get(MCP_GLOBAL_POLICY_KEY) else {
-                    let policy = McpGlobalPolicy::default();
-                    return Ok(McpGlobalPolicyState {
-                        configured: false,
-                        read_only: policy.read_only,
-                        allow_dangerous_sql: policy.allow_dangerous_sql,
-                        allowed_connection_ids: policy.allowed_connection_ids,
-                    });
-                };
-                let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
-                    .map_err(|e| format!("invalid MCP policy: {e}"))?;
-                Ok(McpGlobalPolicyState {
-                    configured: true,
-                    read_only: policy.read_only,
-                    allow_dangerous_sql: policy.allow_dangerous_sql,
-                    allowed_connection_ids: policy.allowed_connection_ids,
-                })
+                match stored {
+                    Some(stored) => {
+                        let policy = serde_json::from_str::<McpUserPolicy>(&stored)
+                            .map_err(|e| format!("invalid MCP policy: {e}"))?;
+                        Ok(McpUserPolicyState::from_policy(&policy, true))
+                    }
+                    None => Ok(McpUserPolicyState::from_policy(&McpUserPolicy::default(), false)),
+                }
             })
             .await;
         result.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
     }
 
-    pub async fn save_mcp_global_policy(&self, policy: &McpGlobalPolicy) -> Result<(), String> {
-        let policy = serde_json::to_value(policy).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    pub async fn save_mcp_user_policy(&self, user_id: &str, policy: &McpUserPolicy) -> Result<(), String> {
+        let user_id = user_id.to_string();
+        let policy = serde_json::to_string(policy).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
         self.with_conn(move |conn| {
-            let current: Option<String> = conn
-                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
-                .optional()
-                .map_err(|e| e.to_string())?;
-            let mut settings = match current {
-                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
-                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
-                None => serde_json::Map::new(),
-            };
-            settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy);
-            let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
-            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            conn.execute(
+                "INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?1, ?2, ?3)",
+                params![user_id, MCP_USER_POLICY_SETTING_KEY, policy],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    /// The account that owns a connection. MCP scope and permission are always
+    /// resolved from the owning account, never from the caller's identity.
+    pub async fn connection_user_id(&self, connection_id: &str) -> Result<Option<String>, String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row("SELECT user_id FROM connections WHERE id = ?1", [connection_id], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_desktop_settings(&self, desktop_settings: &DesktopSettings) -> Result<(), String> {
@@ -2057,34 +2300,28 @@ impl Storage {
         self.load_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY).await
     }
 
-    pub async fn save_ai_global_custom_instructions(&self, content: &str) -> Result<(), String> {
+    pub async fn save_ai_global_custom_instructions(&self, content: &str, user_id: &str) -> Result<(), String> {
         let trimmed = content.trim();
         if trimmed.chars().count() > 8000 {
             return Err("global instructions too long (max 8000 chars)".to_string());
         }
-        self.save_app_state_value(APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY, &serde_json::Value::String(trimmed.to_string()))
-            .await
+        self.save_user_setting(user_id, AI_GLOBAL_INSTRUCTIONS_SETTING_KEY, trimmed).await
     }
 
-    pub async fn load_ai_global_custom_instructions(&self) -> Result<String, String> {
-        let value = self.load_app_state_value(APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY).await?;
-        Ok(match value {
-            Some(serde_json::Value::String(s)) => s,
-            None | Some(serde_json::Value::Null) => String::new(),
-            other => other.map(|v| v.to_string()).unwrap_or_default(),
-        })
+    pub async fn load_ai_global_custom_instructions(&self, user_id: &str) -> Result<String, String> {
+        Ok(self.get_user_setting(user_id, AI_GLOBAL_INSTRUCTIONS_SETTING_KEY).await?.unwrap_or_default())
     }
 
-    pub async fn save_ai_chat_selection(&self, selection: &AiChatSelectionState) -> Result<(), String> {
+    pub async fn save_ai_chat_selection(&self, selection: &AiChatSelectionState, user_id: &str) -> Result<(), String> {
         let value = serde_json::to_value(selection).map_err(|e| e.to_string())?;
-        self.save_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY, &value).await
+        self.save_user_setting(user_id, AI_CHAT_SELECTION_SETTING_KEY, &value.to_string()).await
     }
 
-    pub async fn load_ai_chat_selection(&self) -> Result<Option<AiChatSelectionState>, String> {
-        self.load_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY)
-            .await?
-            .map(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
-            .transpose()
+    pub async fn load_ai_chat_selection(&self, user_id: &str) -> Result<Option<AiChatSelectionState>, String> {
+        let Some(raw) = self.get_user_setting(user_id, AI_CHAT_SELECTION_SETTING_KEY).await? else {
+            return Ok(None);
+        };
+        serde_json::from_str::<AiChatSelectionState>(&raw).map(Some).map_err(|e| e.to_string())
     }
 
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
@@ -2396,16 +2633,17 @@ impl Storage {
 
     // Prompt Templates
 
-    pub async fn load_prompt_templates(&self) -> Result<Vec<PromptTemplate>, String> {
-        self.with_conn(|conn| {
+    pub async fn load_prompt_templates(&self, user_id: &str) -> Result<Vec<PromptTemplate>, String> {
+        let user_id = user_id.to_string();
+        self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, name, content, created_at, updated_at \
-                     FROM prompt_templates ORDER BY created_at, id",
+                     FROM prompt_templates WHERE user_id = ?1 ORDER BY created_at, id",
                 )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map([&user_id], |row| {
                     Ok(PromptTemplate {
                         id: row.get(0)?,
                         name: row.get(1)?,
@@ -2420,10 +2658,17 @@ impl Storage {
         .await
     }
 
-    pub async fn save_prompt_template(&self, id: &str, name: &str, content: &str) -> Result<PromptTemplate, String> {
+    pub async fn save_prompt_template(
+        &self,
+        id: &str,
+        name: &str,
+        content: &str,
+        user_id: &str,
+    ) -> Result<PromptTemplate, String> {
         let id = id.to_string();
         let name = name.trim().to_string();
         let content = content.to_string();
+        let user_id = user_id.to_string();
 
         // Validation
         if name.is_empty() {
@@ -2444,10 +2689,10 @@ impl Storage {
             // str::to_lowercase() handles full Unicode case folding.
             let name_lower = name.to_lowercase();
             let mut stmt = conn
-                .prepare("SELECT name FROM prompt_templates WHERE id != ?1")
+                .prepare("SELECT name FROM prompt_templates WHERE id != ?1 AND user_id = ?2")
                 .map_err(|e| e.to_string())?;
             let duplicate = stmt
-                .query_map(params![id], |row| row.get::<_, String>(0))
+                .query_map(params![id, user_id], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?
                 .filter_map(|r| r.ok())
                 .any(|existing| existing.to_lowercase() == name_lower);
@@ -2457,23 +2702,27 @@ impl Storage {
 
             // Check if row exists to decide INSERT vs UPDATE
             let existing_created_at: Option<String> = conn
-                .query_row("SELECT created_at FROM prompt_templates WHERE id = ?1", params![id], |row| row.get(0))
+                .query_row(
+                    "SELECT created_at FROM prompt_templates WHERE id = ?1 AND user_id = ?2",
+                    params![id, user_id],
+                    |row| row.get(0),
+                )
                 .optional()
                 .map_err(|e| e.to_string())?;
 
             if let Some(created_at) = existing_created_at {
                 // UPDATE — preserve created_at
                 conn.execute(
-                    "UPDATE prompt_templates SET name = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
-                    params![name, content, now, id],
+                    "UPDATE prompt_templates SET name = ?1, content = ?2, updated_at = ?3 WHERE id = ?4 AND user_id = ?5",
+                    params![name, content, now, id, user_id],
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(PromptTemplate { id, name, content, created_at, updated_at: now })
             } else {
                 // INSERT
                 conn.execute(
-                    "INSERT INTO prompt_templates (id, name, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![id, name, content, now, now],
+                    "INSERT INTO prompt_templates (id, name, content, created_at, updated_at, user_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![id, name, content, now, now, user_id],
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(PromptTemplate { id, name, content, created_at: now.clone(), updated_at: now })
@@ -2482,11 +2731,13 @@ impl Storage {
         .await
     }
 
-    pub async fn delete_prompt_template(&self, id: &str) -> Result<(), String> {
+    pub async fn delete_prompt_template(&self, id: &str, user_id: &str) -> Result<(), String> {
         let id = id.to_string();
+        let user_id = user_id.to_string();
         self.with_conn(move |conn| {
-            let rows =
-                conn.execute("DELETE FROM prompt_templates WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+            let rows = conn
+                .execute("DELETE FROM prompt_templates WHERE id = ?1 AND user_id = ?2", params![id, user_id])
+                .map_err(|e| e.to_string())?;
             if rows == 0 {
                 Err("template not found".to_string())
             } else {
@@ -2499,33 +2750,32 @@ impl Storage {
 
 // Connections
 
-fn load_mcp_global_policy_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<McpGlobalPolicy, String> {
-    let settings_json: Option<String> = tx
-        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+fn load_mcp_user_policy_in_tx(tx: &rusqlite::Transaction<'_>, user_id: &str) -> Result<McpUserPolicy, String> {
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT value FROM user_settings WHERE user_id = ?1 AND key = ?2",
+            params![user_id, MCP_USER_POLICY_SETTING_KEY],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
-    Ok(match settings_json {
-        Some(json) => {
-            let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
-                .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid app settings JSON: {e}"))?;
-            match settings.get(MCP_GLOBAL_POLICY_KEY) {
-                Some(value) => serde_json::from_value::<McpGlobalPolicy>(value.clone())
-                    .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid MCP policy: {e}"))?,
-                None => McpGlobalPolicy::default(),
-            }
-        }
-        None => McpGlobalPolicy::default(),
-    })
+    match stored {
+        Some(stored) => serde_json::from_str::<McpUserPolicy>(&stored)
+            .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid MCP policy: {e}")),
+        None => Ok(McpUserPolicy::default()),
+    }
 }
 
 fn ensure_mcp_connection_change_allowed_in_tx(
     tx: &rusqlite::Transaction<'_>,
+    user_id: &str,
     target_connection_id: Option<&str>,
 ) -> Result<(), String> {
-    let policy = load_mcp_global_policy_in_tx(tx)?;
+    let policy = load_mcp_user_policy_in_tx(tx, user_id)?;
     if policy.read_only {
         return Err(
-            "MCP_READ_ONLY: DBX global MCP read-only mode is enabled. Connection changes are blocked.".to_string()
+            "MCP_READ_ONLY: DBX MCP read-only mode is enabled for this account. Connection changes are blocked."
+                .to_string(),
         );
     }
     if let Some(connection_id) = target_connection_id {
@@ -2764,7 +3014,7 @@ impl Storage {
         let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, &user_id, None)?;
             persist_connection_in_tx(&tx, &config, &user_id)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
@@ -2777,7 +3027,7 @@ impl Storage {
         let user_id = user_id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&connection_id))?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, &user_id, Some(&connection_id))?;
             let removed = tx
                 .execute("DELETE FROM connections WHERE id = ?1 AND user_id = ?2", [&connection_id, &user_id])
                 .map_err(|e| e.to_string())?
@@ -4484,8 +4734,9 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
+        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpUserPolicy,
+        McpUserPolicyState, Storage, APP_STATE_AI_CHAT_SELECTION_KEY, LEGACY_MCP_GLOBAL_POLICY_KEY,
+        MCP_USER_POLICY_SETTING_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference,
@@ -4731,24 +4982,24 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("profile-1", "s3cret");
-        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
-        assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile), "").await.unwrap();
+        assert_eq!(storage.load_tunnel_profiles("").await.unwrap(), vec![profile.clone()]);
 
         // Applying a scrubbed copy (e.g. from a sync snapshot) keeps stored secrets.
         let mut scrubbed = profile.clone();
         scrubbed.scrub_secrets();
-        storage.save_tunnel_profiles_preserving_secrets(&[scrubbed.clone()]).await.unwrap();
-        match &storage.load_tunnel_profiles().await.unwrap()[0] {
+        storage.save_tunnel_profiles_preserving_secrets(&[scrubbed.clone()], "").await.unwrap();
+        match &storage.load_tunnel_profiles("").await.unwrap()[0] {
             TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "s3cret"),
             other => panic!("expected ssh profile, got {other:?}"),
         }
 
         // A plain save is exact: clearing a secret really clears it.
-        storage.save_tunnel_profiles(&[scrubbed.clone()]).await.unwrap();
-        assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![scrubbed]);
+        storage.save_tunnel_profiles(&[scrubbed.clone()], "").await.unwrap();
+        assert_eq!(storage.load_tunnel_profiles("").await.unwrap(), vec![scrubbed]);
 
-        storage.save_tunnel_profiles(&[]).await.unwrap();
-        assert!(storage.load_tunnel_profiles().await.unwrap().is_empty());
+        storage.save_tunnel_profiles(&[], "").await.unwrap();
+        assert!(storage.load_tunnel_profiles("").await.unwrap().is_empty());
 
         let _ = std::fs::remove_file(path);
     }
@@ -4759,7 +5010,7 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         let profile = ssh_profile("", "secret");
-        assert!(storage.save_tunnel_profiles(&[profile]).await.is_err());
+        assert!(storage.save_tunnel_profiles(&[profile], "").await.is_err());
 
         let _ = std::fs::remove_file(path);
     }
@@ -5410,13 +5661,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_global_policy_defaults_unconfigured_and_roundtrips_atomically() {
-        let path = temp_db_path("mcp-global-policy");
+    async fn mcp_user_policy_is_scoped_per_account_and_roundtrips() {
+        let path = temp_db_path("mcp-user-policy");
         let storage = Storage::open(&path).await.unwrap();
 
         assert_eq!(
-            storage.load_mcp_global_policy().await.unwrap(),
-            McpGlobalPolicyState {
+            storage.load_mcp_user_policy("user-a").await.unwrap(),
+            McpUserPolicyState {
                 configured: false,
                 read_only: false,
                 allow_dangerous_sql: false,
@@ -5426,43 +5677,55 @@ mod tests {
 
         storage.save_password_hash("preserved").await.unwrap();
         storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: true,
-                allow_dangerous_sql: true,
-                allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
-            })
+            .save_mcp_user_policy(
+                "user-a",
+                &McpUserPolicy {
+                    read_only: true,
+                    allow_dangerous_sql: true,
+                    allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+                },
+            )
             .await
             .unwrap();
 
         assert_eq!(
-            storage.load_mcp_global_policy().await.unwrap(),
-            McpGlobalPolicyState {
+            storage.load_mcp_user_policy("user-a").await.unwrap(),
+            McpUserPolicyState {
                 configured: true,
                 read_only: true,
                 allow_dangerous_sql: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
             }
         );
+        // Other accounts never inherit somebody else's scope or write level.
+        assert_eq!(
+            storage.load_mcp_user_policy("user-b").await.unwrap(),
+            McpUserPolicyState {
+                configured: false,
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+            }
+        );
         assert_eq!(storage.load_password_hash().await.unwrap().as_deref(), Some("preserved"));
-        let settings = storage.load_app_settings_json().await.unwrap();
-        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["readOnly"], true);
-        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowDangerousSql"], true);
-        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowedConnectionIds"][0], "conn-1");
-        assert!(settings[MCP_GLOBAL_POLICY_KEY].get("configured").is_none());
 
         storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
-        assert!(storage.load_mcp_global_policy().await.unwrap().read_only);
+        assert!(storage.load_mcp_user_policy("user-a").await.unwrap().read_only);
     }
 
     #[tokio::test]
-    async fn mcp_global_policy_fails_closed_on_malformed_settings() {
-        let path = temp_db_path("mcp-global-policy-malformed");
+    async fn mcp_user_policy_fails_closed_on_malformed_stored_policy() {
+        let path = temp_db_path("mcp-user-policy-malformed");
         let storage = Storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
                 conn.execute(
-                    "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
-                    [r#"{"mcp_global_policy":{"readOnly":"yes","allowedConnectionIds":null}}"#],
+                    "INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        "user-a",
+                        MCP_USER_POLICY_SETTING_KEY,
+                        r#"{"readOnly":"yes","allowedConnectionIds":null}"#
+                    ],
                 )
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -5470,13 +5733,110 @@ mod tests {
             .await
             .unwrap();
 
-        let error = storage.load_mcp_global_policy().await.unwrap_err();
+        let error = storage.load_mcp_user_policy("user-a").await.unwrap_err();
         assert!(error.starts_with("MCP_POLICY_UNAVAILABLE:"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_instance_policy_migrates_to_the_owning_account_once() {
+        let path = temp_db_path("mcp-legacy-policy-migration");
+        let owner = mq_connection("owner", "owner-token");
+        let other = mq_connection("other", "other-token");
+        let admin_id;
+        {
+            let storage = Storage::open(&path).await.unwrap();
+            admin_id = storage
+                .create_user(&crate::user::CreateUserRequest {
+                    username: "owner".to_string(),
+                    password: "owner-password".to_string(),
+                    display_name: None,
+                    is_admin: true,
+                })
+                .await
+                .unwrap()
+                .id;
+            storage.save_connections(std::slice::from_ref(&owner), &admin_id).await.unwrap();
+            storage.save_connections(std::slice::from_ref(&other), "other-user").await.unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [r#"{"mcp_global_policy":{"readOnly":true,"allowedConnectionIds":null}}"#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        let settings = storage.load_app_settings_json().await.unwrap();
+        assert!(settings.get(LEGACY_MCP_GLOBAL_POLICY_KEY).is_none());
+        assert_eq!(
+            storage.load_mcp_user_policy(&admin_id).await.unwrap(),
+            McpUserPolicyState {
+                configured: true,
+                read_only: true,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+            }
+        );
+        // Other accounts must not inherit an allowlist that references
+        // connections they do not own.
+        assert!(!storage.load_mcp_user_policy("other-user").await.unwrap().configured);
+
+        // A policy saved by the owner is not overwritten by later openings.
+        storage
+            .save_mcp_user_policy(&admin_id, &McpUserPolicy { read_only: false, ..Default::default() })
+            .await
+            .unwrap();
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert!(!reopened.load_mcp_user_policy(&admin_id).await.unwrap().read_only);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_instance_policy_migrates_to_the_desktop_scope() {
+        let path = temp_db_path("mcp-legacy-policy-desktop");
+        let desktop = mq_connection("desktop", "desktop-token");
+        {
+            let storage = Storage::open(&path).await.unwrap();
+            storage.save_connections(std::slice::from_ref(&desktop), "").await.unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [r#"{"mcp_global_policy":{"readOnly":false,"allowDangerousSql":true,"allowedConnectionIds":["desktop"]}}"#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(
+            storage.load_mcp_user_policy("").await.unwrap(),
+            McpUserPolicyState {
+                configured: true,
+                read_only: false,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: Some(vec!["desktop".to_string()]),
+            }
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
     async fn malformed_app_settings_cannot_be_silently_replaced_by_an_unrelated_save() {
-        let path = temp_db_path("mcp-global-policy-invalid-settings-shape");
+        let path = temp_db_path("invalid-app-settings-shape");
         let storage = Storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
@@ -5487,7 +5847,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(storage.load_mcp_global_policy().await.unwrap_err().starts_with("MCP_POLICY_UNAVAILABLE:"));
+        assert!(storage.load_mcp_user_policy("user-a").await.is_ok());
         assert!(storage.save_password_hash("must-not-reset-policy").await.is_err());
         let raw = storage
             .with_conn(|conn| {
@@ -5502,24 +5862,164 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_global_policy_defaults_dangerous_sql_to_disabled_for_existing_settings() {
-        let path = temp_db_path("mcp-global-policy-existing");
-        let storage = Storage::open(&path).await.unwrap();
-        storage
-            .with_conn(|conn| {
-                conn.execute(
-                    "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
-                    [r#"{"mcp_global_policy":{"readOnly":false,"allowedConnectionIds":null}}"#],
-                )
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap();
+    async fn unreadable_legacy_instance_policy_keeps_the_owner_read_only() {
+        let path = temp_db_path("mcp-legacy-policy-unreadable");
+        let owner = mq_connection("owner", "owner-token");
+        let admin_id;
+        {
+            let storage = Storage::open(&path).await.unwrap();
+            admin_id = storage
+                .create_user(&crate::user::CreateUserRequest {
+                    username: "owner".to_string(),
+                    password: "owner-password".to_string(),
+                    display_name: None,
+                    is_admin: true,
+                })
+                .await
+                .unwrap()
+                .id;
+            storage.save_connections(std::slice::from_ref(&owner), &admin_id).await.unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [r#"{"mcp_global_policy":{"readOnly":"yes","allowedConnectionIds":null}}"#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+        }
 
-        let policy = storage.load_mcp_global_policy().await.unwrap();
+        let storage = Storage::open(&path).await.unwrap();
+        let policy = storage.load_mcp_user_policy(&admin_id).await.unwrap();
         assert!(policy.configured);
+        assert!(policy.read_only);
         assert!(!policy.allow_dangerous_sql);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn prompt_templates_are_scoped_per_account() {
+        let path = temp_db_path("prompt-templates-per-account");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_prompt_template("t1", "Mine", "content-a", "user-a").await.unwrap();
+        storage.save_prompt_template("t2", "Other", "content-b", "user-b").await.unwrap();
+
+        assert_eq!(storage.load_prompt_templates("user-a").await.unwrap().len(), 1);
+        assert_eq!(storage.load_prompt_templates("user-a").await.unwrap()[0].name, "Mine");
+        assert_eq!(storage.load_prompt_templates("user-b").await.unwrap()[0].name, "Other");
+
+        // A duplicate name is only a duplicate inside the same account.
+        storage.save_prompt_template("t3", "Mine", "content-c", "user-b").await.unwrap();
+        assert_eq!(storage.load_prompt_templates("user-b").await.unwrap().len(), 2);
+
+        // An account cannot delete another account's template.
+        assert!(storage.delete_prompt_template("t1", "user-b").await.is_err());
+        assert_eq!(storage.load_prompt_templates("user-a").await.unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn tunnel_profiles_are_scoped_per_account() {
+        let path = temp_db_path("tunnel-profiles-per-account");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let profile_a = ssh_profile("profile-a", "secret-a");
+        let profile_b = ssh_profile("profile-b", "secret-b");
+
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile_a), "user-a").await.unwrap();
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile_b), "user-b").await.unwrap();
+
+        assert_eq!(storage.load_tunnel_profiles("user-a").await.unwrap(), vec![profile_a.clone()]);
+        assert_eq!(storage.load_tunnel_profiles("user-b").await.unwrap(), vec![profile_b.clone()]);
+
+        // Clearing one account's catalog keeps the other account's profiles.
+        storage.save_tunnel_profiles(&[], "user-a").await.unwrap();
+        assert!(storage.load_tunnel_profiles("user-a").await.unwrap().is_empty());
+        assert_eq!(storage.load_tunnel_profiles("user-b").await.unwrap(), vec![profile_b.clone()]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_selection_instructions_and_legacy_configs_are_scoped_per_account() {
+        let path = temp_db_path("ai-settings-per-account");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let selection = AiChatSelectionState {
+            version: 1,
+            active: None,
+            effort_preferences: Vec::new(),
+            default_mode: Some(crate::ai::AiAssistantMode::Agent),
+        };
+        storage.save_ai_chat_selection(&selection, "user-a").await.unwrap();
+        storage.save_ai_global_custom_instructions("only mine", "user-a").await.unwrap();
+
+        assert_eq!(storage.load_ai_chat_selection("user-a").await.unwrap(), Some(selection));
+        assert_eq!(storage.load_ai_global_custom_instructions("user-a").await.unwrap(), "only mine");
+        assert_eq!(storage.load_ai_chat_selection("user-b").await.unwrap(), None);
+        assert_eq!(storage.load_ai_global_custom_instructions("user-b").await.unwrap(), "");
+
+        storage.save_ai_config(&make_ai_config("mine", true).config, "user-a").await.unwrap();
+        assert!(storage.load_ai_config("user-a").await.unwrap().is_some());
+        // A legacy AI config (and its API key) never leaks into another account.
+        assert!(storage.load_ai_config("user-b").await.unwrap().is_none());
+        assert!(storage.load_ai_provider_configs("user-b").await.unwrap().is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_instance_rows_are_handed_to_the_owning_account() {
+        let path = temp_db_path("legacy-rows-owner");
+        let admin_id;
+        {
+            let storage = Storage::open(&path).await.unwrap();
+            admin_id = storage
+                .create_user(&crate::user::CreateUserRequest {
+                    username: "owner".to_string(),
+                    password: "owner-password".to_string(),
+                    display_name: None,
+                    is_admin: true,
+                })
+                .await
+                .unwrap()
+                .id;
+            storage.save_connections(std::slice::from_ref(&mq_connection("owner", "token")), &admin_id).await.unwrap();
+            // Instance-wide rows and app_state values as written before multi-account mode.
+            storage.save_prompt_template("t1", "Legacy", "content", "").await.unwrap();
+            storage.save_ai_chat_selection(&AiChatSelectionState::default(), "").await.unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
+                        rusqlite::params![APP_STATE_AI_CHAT_SELECTION_KEY, r#"{"version":1,"defaultMode":"agent"}"#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_prompt_templates(&admin_id).await.unwrap().len(), 1);
+        assert!(storage.load_prompt_templates("").await.unwrap().is_empty());
+        assert!(storage.load_prompt_templates("other-user").await.unwrap().is_empty());
+        assert_eq!(
+            storage.load_ai_chat_selection(&admin_id).await.unwrap().and_then(|value| value.default_mode),
+            Some(crate::ai::AiAssistantMode::Agent)
+        );
+        // The instance-wide app_state row is consumed by the migration.
+        let remaining = storage.load_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY).await.unwrap();
+        assert!(remaining.is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -5531,15 +6031,35 @@ mod tests {
         storage.save_connections(&[kept.clone(), removed.clone()], "").await.unwrap();
 
         storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: false,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: Some(vec![kept.id.clone()]),
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy {
+                    read_only: false,
+                    allow_dangerous_sql: false,
+                    allowed_connection_ids: Some(vec![kept.id.clone()]),
+                },
+            )
             .await
             .unwrap();
         let error = storage.remove_connection_for_mcp(&removed.id, "").await.unwrap_err();
         assert!(error.starts_with("CONNECTION_OUT_OF_SCOPE:"));
+
+        // A read-only policy belongs to its own account and must not leak into
+        // (or out of) another account's MCP session.
+        storage
+            .save_mcp_user_policy("other-user", &McpUserPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(storage
+            .remove_connection_for_mcp(&kept.id, "other-user")
+            .await
+            .unwrap_err()
+            .starts_with("MCP_READ_ONLY:"));
+        assert!(storage
+            .remove_connection_for_mcp(&removed.id, "")
+            .await
+            .unwrap_err()
+            .starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
         let mut concurrently_updated = removed.clone();
         concurrently_updated.host = "updated-by-web-ui".to_string();
@@ -5554,11 +6074,10 @@ mod tests {
         );
 
         storage
-            .save_mcp_global_policy(&McpGlobalPolicy {
-                read_only: true,
-                allow_dangerous_sql: false,
-                allowed_connection_ids: None,
-            })
+            .save_mcp_user_policy(
+                "",
+                &McpUserPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            )
             .await
             .unwrap();
         let error = storage.remove_connection_for_mcp(&kept.id, "").await.unwrap_err();
@@ -5865,9 +6384,9 @@ mod tests {
             default_mode: Some(AiAssistantMode::Agent),
         };
 
-        storage.save_ai_chat_selection(&selection).await.unwrap();
+        storage.save_ai_chat_selection(&selection, "").await.unwrap();
 
-        assert_eq!(storage.load_ai_chat_selection().await.unwrap(), Some(selection));
+        assert_eq!(storage.load_ai_chat_selection("").await.unwrap(), Some(selection));
         assert_eq!(storage.load_app_settings_json().await.unwrap().get("ai_chat_selection_v1"), None);
     }
 
@@ -5987,14 +6506,14 @@ mod tests {
             updated_at: "2026-06-27T00:00:00Z".to_string(),
         };
 
-        storage.save_saved_sql_file(&file).await.unwrap();
+        storage.save_saved_sql_file(&file, "").await.unwrap();
 
-        let summary = storage.load_saved_sql_library_summary().await.unwrap();
+        let summary = storage.load_saved_sql_library_summary("").await.unwrap();
         assert_eq!(summary.files.len(), 1);
         assert_eq!(summary.files[0].sql, "");
         assert!(!summary.files[0].sql_loaded);
 
-        let loaded = storage.load_saved_sql_file("sql-1").await.unwrap().unwrap();
+        let loaded = storage.load_saved_sql_file("sql-1", "").await.unwrap().unwrap();
         assert_eq!(loaded.sql, file.sql);
         assert!(loaded.sql_loaded);
     }
@@ -6018,15 +6537,15 @@ mod tests {
             created_at: "2026-06-27T00:00:00Z".to_string(),
             updated_at: "2026-06-27T00:00:00Z".to_string(),
         };
-        storage.save_saved_sql_file(&file).await.unwrap();
+        storage.save_saved_sql_file(&file, "").await.unwrap();
 
         file.name = "renamed.sql".to_string();
         file.sql.clear();
         file.sql_loaded = false;
         file.open_count = 1;
-        storage.save_saved_sql_file(&file).await.unwrap();
+        storage.save_saved_sql_file(&file, "").await.unwrap();
 
-        let loaded = storage.load_saved_sql_file("sql-1").await.unwrap().unwrap();
+        let loaded = storage.load_saved_sql_file("sql-1", "").await.unwrap().unwrap();
         assert_eq!(loaded.name, "renamed.sql");
         assert_eq!(loaded.open_count, 1);
         assert_eq!(loaded.sql, "SELECT 1;");
@@ -6090,9 +6609,9 @@ mod tests {
             label: Some("Sonnet 4.6".to_string()),
             supported_effort_levels: vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh],
         }];
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "cfg-test-config");
         assert_eq!(loaded[0].name, "test-config");
@@ -6121,9 +6640,9 @@ mod tests {
         cfg.config.model = "openai/gpt-5.4-mini".to_string();
         cfg.config.opencode_cli_path = Some("/opt/homebrew/bin/opencode".to_string());
         cfg.config.opencode_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::OpenCodeCli));
         assert_eq!(loaded[0].config.model, "openai/gpt-5.4-mini");
@@ -6148,9 +6667,9 @@ mod tests {
         cfg.config.model = "composer-2.5".to_string();
         cfg.config.cursor_cli_path = Some("~/.local/bin/agent".to_string());
         cfg.config.cursor_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::CursorCli));
         assert_eq!(loaded[0].config.model, "composer-2.5");
@@ -6176,9 +6695,9 @@ mod tests {
         cfg.config.model = "default".to_string();
         cfg.config.api_style = AiApiStyle::Completions;
         cfg.config.grok_cli_path = Some("/Users/me/.grok/bin/grok".to_string());
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::GrokCli));
         assert_eq!(loaded[0].config.model, "default");
@@ -6199,9 +6718,9 @@ mod tests {
         cfg.config.model = "kimi-k2.5".to_string();
         cfg.config.codebuddy_cli_path = Some("/opt/homebrew/bin/codebuddy".to_string());
         cfg.config.codebuddy_cli_env.insert("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string());
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::CodeBuddyCli));
         assert_eq!(loaded[0].config.model, "kimi-k2.5");
@@ -6226,9 +6745,9 @@ mod tests {
         cfg.config.endpoint = "https://gateway.example.com/anthropic/v1/messages".to_string();
         cfg.config.model = "vendor/future-model".to_string();
         cfg.config.api_style = AiApiStyle::AnthropicMessages;
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::AnthropicCompatible));
         assert_eq!(loaded[0].config.auth_method, AiAuthMethod::Bearer);
@@ -6252,9 +6771,9 @@ mod tests {
         cfg.config.endpoint = "https://api.minimax.io/v1".to_string();
         cfg.config.model = "MiniMax-M3".to_string();
         cfg.config.api_style = AiApiStyle::Completions;
-        storage.save_ai_config_item(&cfg).await.unwrap();
+        storage.save_ai_config_item(&cfg, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(matches!(loaded[0].config.provider, AiProvider::MiniMax));
         assert_eq!(loaded[0].config.auth_method, AiAuthMethod::Bearer);
@@ -6271,12 +6790,12 @@ mod tests {
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", true);
-        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg1, "").await.unwrap();
 
         // Second default config should succeed and cascade-clear the first
-        storage.save_ai_config_item(&cfg2).await.unwrap();
+        storage.save_ai_config_item(&cfg2, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].id, "cfg-config-b");
@@ -6291,15 +6810,15 @@ mod tests {
 
         let cfg1 = make_ai_config("config-a", true);
         let cfg2 = make_ai_config("config-b", false);
-        storage.save_ai_config_item(&cfg1).await.unwrap();
-        storage.save_ai_config_item(&cfg2).await.unwrap();
-        assert_eq!(storage.load_ai_configs().await.unwrap().iter().filter(|c| c.is_default).count(), 1);
+        storage.save_ai_config_item(&cfg1, "").await.unwrap();
+        storage.save_ai_config_item(&cfg2, "").await.unwrap();
+        assert_eq!(storage.load_ai_configs("").await.unwrap().iter().filter(|c| c.is_default).count(), 1);
 
         // Update cfg-b to be default via save_ai_config_item — should succeed and clear cfg-a
         let cfg2 = make_ai_config("config-b", true);
-        storage.save_ai_config_item(&cfg2).await.unwrap();
+        storage.save_ai_config_item(&cfg2, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].id, "cfg-config-b");
@@ -6313,12 +6832,12 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         let cfg1 = make_ai_config("same-name", false);
-        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg1, "").await.unwrap();
 
         // Different id, same name → should fail with name conflict
         let mut cfg2 = make_ai_config("same-name", false);
         cfg2.id = "cfg-other".to_string();
-        let err = storage.save_ai_config_item(&cfg2).await.unwrap_err();
+        let err = storage.save_ai_config_item(&cfg2, "").await.unwrap_err();
         assert!(err.contains("ai.configNameExists"), "Expected name conflict error, got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6331,13 +6850,13 @@ mod tests {
 
         let cfg1 = make_ai_config("first", true);
         let cfg2 = make_ai_config("second", false);
-        storage.save_ai_config_item(&cfg1).await.unwrap();
-        storage.save_ai_config_item(&cfg2).await.unwrap();
+        storage.save_ai_config_item(&cfg1, "").await.unwrap();
+        storage.save_ai_config_item(&cfg2, "").await.unwrap();
 
         // Switch default to second
-        storage.set_default_ai_config("cfg-second").await.unwrap();
+        storage.set_default_ai_config("cfg-second", "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         let first = loaded.iter().find(|c| c.id == "cfg-first").unwrap();
         let second = loaded.iter().find(|c| c.id == "cfg-second").unwrap();
         assert!(!first.is_default);
@@ -6353,13 +6872,13 @@ mod tests {
 
         let cfg1 = make_ai_config("default-one", true);
         let cfg2 = make_ai_config("other", false);
-        storage.save_ai_config_item(&cfg1).await.unwrap();
-        storage.save_ai_config_item(&cfg2).await.unwrap();
+        storage.save_ai_config_item(&cfg1, "").await.unwrap();
+        storage.save_ai_config_item(&cfg2, "").await.unwrap();
 
         // Delete the default config
-        storage.delete_ai_config("cfg-default-one").await.unwrap();
+        storage.delete_ai_config("cfg-default-one", "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         // Remaining config should NOT be auto-promoted to default
         assert!(!loaded[0].is_default);
@@ -6374,9 +6893,9 @@ mod tests {
 
         let configs =
             vec![make_ai_config("batch-a", true), make_ai_config("batch-b", false), make_ai_config("batch-c", false)];
-        storage.save_ai_configs(&configs).await.unwrap();
+        storage.save_ai_configs(&configs, "").await.unwrap();
 
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 3);
 
         std::fs::remove_file(&db).ok();
@@ -6388,21 +6907,21 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         // Pre-populate old tables as if migration hasn't run yet
-        storage.save_ai_config(&make_ai_config("legacy-active", false).config).await.unwrap();
-        storage.save_ai_provider_config("openai", &make_ai_config("legacy-openai", false).config).await.unwrap();
+        storage.save_ai_config(&make_ai_config("legacy-active", false).config, "").await.unwrap();
+        storage.save_ai_provider_config("openai", &make_ai_config("legacy-openai", false).config, "").await.unwrap();
 
         // save_ai_configs should clear old tables
         let configs = vec![make_ai_config("new-a", true)];
-        storage.save_ai_configs(&configs).await.unwrap();
+        storage.save_ai_configs(&configs, "").await.unwrap();
 
         // New table has the saved config
-        let loaded = storage.load_ai_configs().await.unwrap();
+        let loaded = storage.load_ai_configs("").await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "new-a");
 
         // Old tables are cleared — prevents re-migration on restart
-        assert!(storage.load_ai_config().await.unwrap().is_none(), "ai_config should be deleted");
-        let old_providers = storage.load_ai_provider_configs().await.unwrap();
+        assert!(storage.load_ai_config("").await.unwrap().is_none(), "ai_config should be deleted");
+        let old_providers = storage.load_ai_provider_configs("").await.unwrap();
         assert!(old_providers.is_empty(), "ai_provider_configs should be deleted");
 
         std::fs::remove_file(&db).ok();
@@ -6415,7 +6934,7 @@ mod tests {
         let db = temp_db_path("pt-save-new");
         let storage = Storage::open(&db).await.unwrap();
 
-        let result = storage.save_prompt_template("t1", "Production Rules", "SELECT 1").await.unwrap();
+        let result = storage.save_prompt_template("t1", "Production Rules", "SELECT 1", "").await.unwrap();
 
         assert_eq!(result.id, "t1");
         assert_eq!(result.name, "Production Rules");
@@ -6424,7 +6943,7 @@ mod tests {
         assert_eq!(result.created_at, result.updated_at);
 
         // Verify it's persisted in load
-        let templates = storage.load_prompt_templates().await.unwrap();
+        let templates = storage.load_prompt_templates("").await.unwrap();
         assert_eq!(templates.len(), 1);
         assert_eq!(templates[0].id, "t1");
         assert_eq!(templates[0].created_at, result.created_at);
@@ -6438,11 +6957,11 @@ mod tests {
         let db = temp_db_path("pt-save-update");
         let storage = Storage::open(&db).await.unwrap();
 
-        let first = storage.save_prompt_template("t1", "Original Name", "Original content").await.unwrap();
+        let first = storage.save_prompt_template("t1", "Original Name", "Original content", "").await.unwrap();
         // Ensure some time passes so updated_at changes
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
-        let second = storage.save_prompt_template("t1", "Updated Name", "Updated content").await.unwrap();
+        let second = storage.save_prompt_template("t1", "Updated Name", "Updated content", "").await.unwrap();
 
         assert_eq!(second.id, "t1");
         assert_eq!(second.name, "Updated Name");
@@ -6451,7 +6970,7 @@ mod tests {
         assert_ne!(second.updated_at, first.updated_at, "updated_at must change on update");
 
         // Verify only one row exists
-        let templates = storage.load_prompt_templates().await.unwrap();
+        let templates = storage.load_prompt_templates("").await.unwrap();
         assert_eq!(templates.len(), 1);
         assert_eq!(templates[0].name, "Updated Name");
 
@@ -6463,10 +6982,10 @@ mod tests {
         let db = temp_db_path("pt-name-blank");
         let storage = Storage::open(&db).await.unwrap();
 
-        let err = storage.save_prompt_template("t1", "", "content").await.unwrap_err();
+        let err = storage.save_prompt_template("t1", "", "content", "").await.unwrap_err();
         assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
 
-        let err = storage.save_prompt_template("t1", "   ", "content").await.unwrap_err();
+        let err = storage.save_prompt_template("t1", "   ", "content", "").await.unwrap_err();
         assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6478,7 +6997,7 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         let long_name = "a".repeat(51);
-        let err = storage.save_prompt_template("t1", &long_name, "content").await.unwrap_err();
+        let err = storage.save_prompt_template("t1", &long_name, "content", "").await.unwrap_err();
         assert!(err.contains("too long") && err.contains("50"), "expected too long (max 50), got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6494,13 +7013,13 @@ mod tests {
         assert_eq!(name25.chars().count(), 25);
         assert!(name25.len() > 50); // byte length exceeds 50
 
-        let result = storage.save_prompt_template("t1", &name25, "content").await.unwrap();
+        let result = storage.save_prompt_template("t1", &name25, "content", "").await.unwrap();
         assert_eq!(result.name, name25);
 
         // 51 Chinese characters = 153 bytes — should be rejected (51 chars > 50)
         let name51 = "数".repeat(51);
         assert_eq!(name51.chars().count(), 51);
-        let err = storage.save_prompt_template("t2", &name51, "content").await.unwrap_err();
+        let err = storage.save_prompt_template("t2", &name51, "content", "").await.unwrap_err();
         assert!(err.contains("too long") && err.contains("50"), "expected too long (max 50), got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6512,7 +7031,7 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         let long_content = "a".repeat(8001);
-        let err = storage.save_prompt_template("t1", "Valid Name", &long_content).await.unwrap_err();
+        let err = storage.save_prompt_template("t1", "Valid Name", &long_content, "").await.unwrap_err();
         assert!(err.contains("too long") && err.contains("8000"), "expected too long (max 8000), got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6523,14 +7042,14 @@ mod tests {
         let db = temp_db_path("pt-dup-name");
         let storage = Storage::open(&db).await.unwrap();
 
-        storage.save_prompt_template("t1", "Production Rules", "content 1").await.unwrap();
+        storage.save_prompt_template("t1", "Production Rules", "content 1", "").await.unwrap();
 
         // Same name, different id → should fail
-        let err = storage.save_prompt_template("t2", "production rules", "content 2").await.unwrap_err();
+        let err = storage.save_prompt_template("t2", "production rules", "content 2", "").await.unwrap_err();
         assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
 
         // Same name, same id → should update (not fail)
-        let update = storage.save_prompt_template("t1", "Production Rules", "updated").await.unwrap();
+        let update = storage.save_prompt_template("t1", "Production Rules", "updated", "").await.unwrap();
         assert_eq!(update.id, "t1");
         assert_eq!(update.content, "updated");
 
@@ -6545,15 +7064,15 @@ mod tests {
         // SQLite LOWER() is ASCII-only (U+00C4 'Ä' → no change), but Rust
         // str::to_lowercase() does full Unicode case folding (Ä → ä).
         // Both directions must detect the duplicate.
-        storage.save_prompt_template("t1", "Ä规则", "content-upper").await.unwrap();
-        let err = storage.save_prompt_template("t2", "ä规则", "content-lower").await.unwrap_err();
+        storage.save_prompt_template("t1", "Ä规则", "content-upper", "").await.unwrap();
+        let err = storage.save_prompt_template("t2", "ä规则", "content-lower", "").await.unwrap_err();
         assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
 
         // Reverse: lower-case first, upper-case second.
         let db = temp_db_path("pt-dup-unicode-2");
         let storage = Storage::open(&db).await.unwrap();
-        storage.save_prompt_template("t1", "ä规则", "content-lower").await.unwrap();
-        let err = storage.save_prompt_template("t2", "Ä规则", "content-upper").await.unwrap_err();
+        storage.save_prompt_template("t1", "ä规则", "content-lower", "").await.unwrap();
+        let err = storage.save_prompt_template("t2", "Ä规则", "content-upper", "").await.unwrap_err();
         assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6565,13 +7084,13 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         // Insert in reverse order of created_at by sleeping between inserts
-        storage.save_prompt_template("a", "Template A", "a").await.unwrap();
+        storage.save_prompt_template("a", "Template A", "a", "").await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        storage.save_prompt_template("b", "Template B", "b").await.unwrap();
+        storage.save_prompt_template("b", "Template B", "b", "").await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        storage.save_prompt_template("c", "Template C", "c").await.unwrap();
+        storage.save_prompt_template("c", "Template C", "c", "").await.unwrap();
 
-        let templates = storage.load_prompt_templates().await.unwrap();
+        let templates = storage.load_prompt_templates("").await.unwrap();
         assert_eq!(templates.len(), 3);
         // Order should be by created_at ascending: A first, C last
         assert_eq!(templates[0].id, "a");
@@ -6580,14 +7099,14 @@ mod tests {
 
         // Insert with same created_at — tie-break by id
         // We insert d right after c without delay
-        storage.save_prompt_template("d", "Template D", "d").await.unwrap();
+        storage.save_prompt_template("d", "Template D", "d", "").await.unwrap();
 
-        let templates = storage.load_prompt_templates().await.unwrap();
+        let templates = storage.load_prompt_templates("").await.unwrap();
         assert_eq!(templates.len(), 4);
         assert_eq!(templates[3].id, "d");
 
         // Second load should give same order
-        let templates2 = storage.load_prompt_templates().await.unwrap();
+        let templates2 = storage.load_prompt_templates("").await.unwrap();
         assert_eq!(templates, templates2);
 
         std::fs::remove_file(&db).ok();
@@ -6598,7 +7117,7 @@ mod tests {
         let db = temp_db_path("pt-delete-unknown");
         let storage = Storage::open(&db).await.unwrap();
 
-        let err = storage.delete_prompt_template("nonexistent").await.unwrap_err();
+        let err = storage.delete_prompt_template("nonexistent", "").await.unwrap_err();
         assert!(err.contains("not found"), "expected 'not found', got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6609,11 +7128,11 @@ mod tests {
         let db = temp_db_path("pt-delete-existing");
         let storage = Storage::open(&db).await.unwrap();
 
-        storage.save_prompt_template("t1", "Template", "content").await.unwrap();
-        assert_eq!(storage.load_prompt_templates().await.unwrap().len(), 1);
+        storage.save_prompt_template("t1", "Template", "content", "").await.unwrap();
+        assert_eq!(storage.load_prompt_templates("").await.unwrap().len(), 1);
 
-        storage.delete_prompt_template("t1").await.unwrap();
-        assert!(storage.load_prompt_templates().await.unwrap().is_empty());
+        storage.delete_prompt_template("t1", "").await.unwrap();
+        assert!(storage.load_prompt_templates("").await.unwrap().is_empty());
 
         std::fs::remove_file(&db).ok();
     }
@@ -6626,9 +7145,9 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         let instructions = "Amounts are in cents. Always filter by date range.";
-        storage.save_ai_global_custom_instructions(instructions).await.unwrap();
+        storage.save_ai_global_custom_instructions(instructions, "").await.unwrap();
 
-        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        let loaded = storage.load_ai_global_custom_instructions("").await.unwrap();
         assert_eq!(loaded, instructions);
 
         std::fs::remove_file(&db).ok();
@@ -6639,7 +7158,7 @@ mod tests {
         let db = temp_db_path("gi-default");
         let storage = Storage::open(&db).await.unwrap();
 
-        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        let loaded = storage.load_ai_global_custom_instructions("").await.unwrap();
         assert_eq!(loaded, "");
 
         std::fs::remove_file(&db).ok();
@@ -6651,7 +7170,7 @@ mod tests {
         let storage = Storage::open(&db).await.unwrap();
 
         let long = "a".repeat(8001);
-        let err = storage.save_ai_global_custom_instructions(&long).await.unwrap_err();
+        let err = storage.save_ai_global_custom_instructions(&long, "").await.unwrap_err();
         assert!(err.contains("too long") && err.contains("8000"), "expected too long (max 8000), got: {err}");
 
         std::fs::remove_file(&db).ok();
@@ -6662,12 +7181,12 @@ mod tests {
         let db = temp_db_path("gi-clear");
         let storage = Storage::open(&db).await.unwrap();
 
-        storage.save_ai_global_custom_instructions("Some instructions").await.unwrap();
-        assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "Some instructions");
+        storage.save_ai_global_custom_instructions("Some instructions", "").await.unwrap();
+        assert_eq!(storage.load_ai_global_custom_instructions("").await.unwrap(), "Some instructions");
 
         // Empty string (trimmed) is allowed — equivalent to clear
-        storage.save_ai_global_custom_instructions("").await.unwrap();
-        assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "");
+        storage.save_ai_global_custom_instructions("", "").await.unwrap();
+        assert_eq!(storage.load_ai_global_custom_instructions("").await.unwrap(), "");
 
         std::fs::remove_file(&db).ok();
     }
@@ -6677,8 +7196,8 @@ mod tests {
         let db = temp_db_path("gi-whitespace");
         let storage = Storage::open(&db).await.unwrap();
 
-        storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
-        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        storage.save_ai_global_custom_instructions("   \n  \t  ", "").await.unwrap();
+        let loaded = storage.load_ai_global_custom_instructions("").await.unwrap();
         assert_eq!(loaded, "");
 
         std::fs::remove_file(&db).ok();

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use dbx_core::models::connection::TransportLayerConfig;
+use dbx_core::storage::DESKTOP_ACCOUNT_ID;
 use tauri::State;
 
 use super::connection::AppState;
 
 #[tauri::command]
 pub async fn load_tunnel_profiles(state: State<'_, Arc<AppState>>) -> Result<Vec<TransportLayerConfig>, String> {
-    state.storage.load_tunnel_profiles().await
+    state.storage.load_tunnel_profiles(DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
@@ -15,7 +16,7 @@ pub async fn save_tunnel_profiles(
     state: State<'_, Arc<AppState>>,
     profiles: Vec<TransportLayerConfig>,
 ) -> Result<(), String> {
-    state.storage.save_tunnel_profiles(&profiles).await
+    state.storage.save_tunnel_profiles(&profiles, DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]

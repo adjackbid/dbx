@@ -2345,7 +2345,7 @@ impl AppState {
 
         let profiles: HashMap<String, TransportLayerConfig> = self
             .storage
-            .load_tunnel_profiles()
+            .load_all_tunnel_profiles()
             .await?
             .into_iter()
             .map(|profile| (profile.id().to_string(), profile))
@@ -7731,7 +7731,7 @@ for line in sys.stdin:
         profile.user = "deploy".to_string();
         profile.password = "s3cret".to_string();
         profile.auth_method = "password".to_string();
-        state.storage.save_tunnel_profiles(&[TransportLayerConfig::Ssh(profile)]).await.unwrap();
+        state.storage.save_tunnel_profiles(&[TransportLayerConfig::Ssh(profile)], "").await.unwrap();
 
         let mut config = mysql_config(Some("app"));
         config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("layer-1", "shared-bastion"))];
@@ -7793,7 +7793,7 @@ for line in sys.stdin:
         ];
 
         for (layer, profile) in mismatches {
-            state.storage.save_tunnel_profiles(&[profile]).await.unwrap();
+            state.storage.save_tunnel_profiles(&[profile], "").await.unwrap();
             let mut config = mysql_config(Some("app"));
             config.transport_layers = vec![layer];
 

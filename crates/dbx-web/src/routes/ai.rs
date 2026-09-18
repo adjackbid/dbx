@@ -135,49 +135,62 @@ fn ai_provider_from_key(provider: &str) -> Result<AiProvider, AppError> {
 
 pub async fn save_ai_config(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiConfigRequest>,
 ) -> Result<Json<()>, AppError> {
     reject_web_unsupported_ai_provider(&body.config)?;
-    state.app.storage.save_ai_config(&body.config).await.map_err(AppError::from)?;
+    state.app.storage.save_ai_config(&body.config, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
-pub async fn load_ai_config(State(state): State<Arc<WebState>>) -> Result<Json<Option<AiConfig>>, AppError> {
-    let config = state.app.storage.load_ai_config().await.map_err(AppError::from)?;
+pub async fn load_ai_config(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
+) -> Result<Json<Option<AiConfig>>, AppError> {
+    let config = state.app.storage.load_ai_config(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(config))
 }
 
 pub async fn save_ai_provider_config(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiProviderConfigRequest>,
 ) -> Result<Json<()>, AppError> {
     let parsed_provider = ai_provider_from_key(&body.provider)?;
     let mut config = body.config;
     config.provider = parsed_provider;
     reject_web_unsupported_ai_provider(&config)?;
-    state.app.storage.save_ai_provider_config(&body.provider, &config).await.map_err(AppError::from)?;
+    state
+        .app
+        .storage
+        .save_ai_provider_config(&body.provider, &config, &session.user_id)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn load_ai_provider_configs(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
 ) -> Result<Json<HashMap<String, AiConfig>>, AppError> {
-    let configs = state.app.storage.load_ai_provider_configs().await.map_err(AppError::from)?;
+    let configs = state.app.storage.load_ai_provider_configs(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(configs))
 }
 
 pub async fn save_ai_chat_selection(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveAiChatSelectionRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_ai_chat_selection(&body.selection).await.map_err(AppError::from)?;
+    state.app.storage.save_ai_chat_selection(&body.selection, &session.user_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn load_ai_chat_selection(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
 ) -> Result<Json<Option<AiChatSelectionState>>, AppError> {
-    let selection = state.app.storage.load_ai_chat_selection().await.map_err(AppError::from)?;
+    let selection = state.app.storage.load_ai_chat_selection(&session.user_id).await.map_err(AppError::from)?;
     Ok(Json(selection))
 }
 

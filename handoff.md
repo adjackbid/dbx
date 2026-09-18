@@ -1,116 +1,184 @@
 # 🤝 Context Handoff
 
 ## Meta
-- **exported_at**: 2026-07-24T21:38:36.3992945+08:00
-- **exported_from**: opencode
-- **session_id**: a8f3c1
+- **exported_at**: 2026-09-15T18:10:53+08:00
+- **exported_from**: GitHub Copilot CLI
+- **session_id**: 845973a5-be63-458d-89b0-8b8e6fdcb4bd
+- **supersedes**: `handoff.md` @ HEAD (the 2026-07-29 Schema Diff DDL task — recover with `git show HEAD:handoff.md`)
 
 ## Project
 - **name**: dbx
-- **stack**: Rust, TypeScript, Vue 3, Tauri, Axum, PNPM
-- **root**: D:\Developments\jetbrains\workspace\rust\dbx
+- **stack**: Rust, TypeScript, Vue 3, Tauri, Axum, pnpm
+- **root**: D:\Code_AI\dbx
 - **package_manager**: pnpm
+- **working tree**: uncommitted — `deploy/iis/` is untracked, `README.md` and `README.zh-CN.md` each have one added line
 
 ## Current Task
-We are finishing the review-driven stabilization of the Schema Diff and synchronization tool. The main active blocker is in `crates/dbx-core/src/query.rs`, specifically `execute_schema_diff_deploy`, which currently distinguishes `committed`, `rolled_back`, and `mixed`, but still needs a stronger DDL atomicity model based on both target database behavior and SQL type semantics. This affects the Desktop and Web deploy flow exposed through `src-tauri/src/commands/query.rs`, `crates/dbx-web/src/routes/query.rs`, and the frontend orchestration in `apps/desktop/src/components/diff/SchemaDiffDialog.vue`. In parallel, we documented the overall problem and optimization plan in a new requirements doc and completed a long-term DDL architecture refactor that introduced `DdlDialectProfile` and `type_rewrite` for cross-database DDL generation.
+Build a Windows/IIS deployment path for **DBX Web that does not use Docker**, then prove it
+works. IIS cannot host a native Rust binary directly, so the work was: confirm the shape is
+viable, document it, automate it, and verify it against a real build.
+
+The important framing: **this is not a supported release target.** `crates/dbx-web` is a
+self-contained axum server (HTTP API + static SPA), but releases ship `dbx-web` binaries for
+Linux (musl) only (`.github/workflows/release.yml`, job `static-browser`), and the Windows
+releases ship `dbx.exe` — the Tauri desktop app, which contains no web server. The Docker
+image is the only packaged Web deployment. So an IIS deployment requires building
+`dbx-web.exe` locally, and the deliverable is tooling plus documentation, not a build-target
+change.
 
 ## Progress
-- [x] Merged latest `origin/main` into local `main`, then merged local `main` into local `cmp`
-- [x] Preserved cmp branch functionality after merge, including schema-diff deploy and rollback completeness changes
-- [x] Replaced fake per-statement 2PC deploy path with `execute_schema_diff_deploy` single-connection deploy result flow
-- [x] Unified Schema Diff DDL panel execution and deploy-review confirmation through the same guarded frontend path (`executeDeploySql`)
-- [x] Added structured rollback completeness fields: `rollbackCompleteness` and `missingRollbackObjects`
-- [x] Blocked incomplete rollback execution in the frontend UI (button disable + toast + confirm-dialog gate)
-- [x] Fixed `two_phase_commit` mixed-status logic to avoid re-running `commit()` as a probe
-- [x] Added `detectTableRenames` option and separated table-rename detection from column rename detection
-- [x] Aligned Schema Diff field mapping type source with table structure editor using `listDataTypes(connectionId, database)` + `getDataTypeOptions(dbType)`
-- [x] Introduced `crates/dbx-core/src/sql_dialect/ddl_profile.rs`
-- [x] Introduced `crates/dbx-core/src/sql_dialect/type_rewrite.rs`
-- [x] Migrated CREATE/ALTER table, index, FK, comment, trigger, rename, and permission SQL generation onto profile/type-rewrite driven behavior
-- [x] Reworked MySQL -> Access CREATE TABLE generation to use Access-compatible types and `COUNTER`
-- [x] `execute_schema_diff_deploy` classifies atomicity by DB capability (`CAP_TRANSACTIONAL_DDL`) + SQL risk + transactional path
-- [x] Unit tests cover MySQL/Oracle partial DDL failure → `mixed` + executed_count, Postgres → `rolled_back` + 0
-- [x] Frontend `deployTxResult` maps mixed/rolled_back with executedCount/statementCount
-- [x] Merged main into cmp; fixed functional-index test 10-arg call site
-- [ ] Optionally finish template-level profile datafication for function / sequence / rule / owner SQL shapes
-- [ ] Live DB e2e for deploy partial-failure (optional; unit/web structured tests already present)
+- [x] Confirmed the IIS shape is viable and found the exact constraints (runtime deps, locked config sections, websocket/SSE needs)
+- [x] Added `deploy/iis/deploy.ps1` — build, stage, generate config, configure IIS, smoke test
+- [x] Added `deploy/iis/deploy.bat` — thin wrapper, follows the repo's `dev-full.bat` → `.ps1` convention
+- [x] Added `deploy/iis/web.config` (HttpPlatformHandler) and `deploy/iis/web.config.arr-proxy` (ARR + URL Rewrite) as token templates
+- [x] Added `deploy/iis/README.md` and `deploy/iis/README.zh-TW.md` (11 sections each, kept in sync)
+- [x] Linked the guide from `README.md` and `README.zh-CN.md`
+- [x] Fixed 4 real bugs found while testing (see Key Decisions)
+- [x] Verified every script branch that does not require elevation, using a stub HTTP server as `dbx-web.exe`
+- [x] Built the real artifact and staged it: `cargo build --release -p dbx-web --no-default-features --features duckdb-sidecar,mq-admin,system-fonts` → 23m33s → `D:\dbx`
+- [x] Verified the real binary serves the staged static build and the API, in both root and sub-path mode
+- [ ] **IIS app pool / site creation / ACLs were never executed** — this session had no administrator rights, so the script printed the `appcmd`/`icacls` commands instead
+- [ ] Default-feature build (SQLCipher enabled) was **not** built; only the `-NoSqlCipher` variant exists
+- [ ] Nothing is committed yet
+- [ ] Optional: verify `-C target-feature=+crt-static` to drop the VC++ redistributable requirement on target servers
+
+## Verification Evidence
+Real binary, real staged tree, measured — not inferred.
+
+| Item | Result |
+| --- | --- |
+| `cargo check -p dbx-web` inside `vcvars64.bat` | passed in 12m51s, warnings only |
+| `cargo build --release --no-default-features …` | 23m33s, `D:\dbx\bin\dbx-web.exe` = 38,238,208 bytes |
+| Staged frontend | 893 files in `D:\dbx\static` |
+| Generated config | `D:\dbx\site\web.config`, 3,504 bytes, HttpPlatformHandler mode, `DBX_PUBLIC_BASE_PATH` commented out |
+| Script smoke test | `dbx-web served D:\dbx\static and /api/auth/check on 127.0.0.1:4295`, exit 0 |
+| `GET /` | 200 `text/html` (3,030 bytes) |
+| `GET /assets/index-*.js` | 200 `text/javascript` |
+| `GET /api/auth/check` | 200 `{"authenticated":false,"required":false,"setup_required":true,"user":null}` |
+| `GET /api/version` | 200 `{"version":"0.5.81"}` |
+| `GET /some/deep/route` | **404** with the `index.html` body (content-length 3,030) |
+| `DBX_PUBLIC_BASE_PATH=/dbx`: `/dbx/`, `/dbx`, `/dbx/api/auth/check` | 200, 200, 200 |
+| `DBX_PUBLIC_BASE_PATH=/dbx`: `/api/auth/check`, `/` | 404, 404 |
+| Stub-based branch tests | staging, XML validation, smoke-test pass **and** failure paths (exit 1, no hang, logs surfaced), `-DryRun`, `-Mode arr`, `-SubPath` normalisation, `web.config` idempotency (hand edit preserved) |
+| Test leftovers | removed — no fake `target\release\dbx-web.exe`, no temp deploy roots, no orphaned processes |
+
+The deployment lives **outside** the repo at `D:\dbx` (`bin\`, `static\`, `data\`, `logs\`,
+`site\`) and is not tracked by git. `D:\dbx\data\dbx.db` exists because the verification runs
+started the server; it is a fresh, unconfigured store (no password was set).
 
 ## Active Files
-- `handoff.md` — this handoff document for the next AI
-- `需求问题/2026年7月24日-结构比对与同步工具-问题与优化方案.md` — new problem statement and optimization plan based on current code
-- `crates/dbx-core/src/query.rs` — `SchemaDiffDeployResult` and `execute_schema_diff_deploy`; current blocker lives here
-- `src-tauri/src/commands/query.rs` — Tauri deploy endpoint now delegates to `execute_schema_diff_deploy`
-- `crates/dbx-web/src/routes/query.rs` — Web deploy route now delegates to `execute_schema_diff_deploy`; includes tests
-- `crates/dbx-core/src/two_phase_commit.rs` — mixed / rolled_back logic no longer probes by re-calling `commit()`
-- `crates/dbx-core/src/schema_diff.rs` — main schema diff DDL generation path; profile-driven create/alter/index/fk/comment/trigger logic
-- `crates/dbx-core/src/script_generator.rs` — idempotent wrapper and lock-timeout behavior now profile-driven
-- `crates/dbx-core/src/sql_dialect.rs` — exports for new ddl_profile and type_rewrite modules
-- `crates/dbx-core/src/sql_dialect/ddl_profile.rs` — target `DatabaseType` profile registry and DDL behavior knobs
-- `crates/dbx-core/src/sql_dialect/type_rewrite.rs` — type rewrite pipeline and auto-increment helpers
-- `apps/desktop/src/components/diff/SchemaDiffDialog.vue` — unified protected deploy flow, rollback completeness handling, field mapping dialog wiring
-- `apps/desktop/src/components/diff/SchemaDiffDdlPanel.vue` — rollback incomplete banner and execution block props
-- `apps/desktop/src/components/diff/SchemaDiffDeployStep.vue` — deploy-step rollback incomplete banner and disabled deploy state
-- `apps/desktop/src/lib/schema/deployTxResult.ts` — deploy result status/message mapping including `mixed` and `rolled_back`
-- `apps/desktop/src/lib/schema/__tests__/deployTxResult.spec.ts` — frontend unit tests for deploy result interpretation
-- `apps/desktop/src/lib/schema/schemaDiff.ts` — frontend types for `SchemaDiffPreparation`, rollback completeness, and missing rollback objects
-- `apps/desktop/src/components/diff/FieldMappingPanel.vue` — field mapping types now use the same live/static source strategy as table structure editor
-- `apps/desktop/src/components/diff/FieldMappingDialog.vue` — passes source/target connection and database context into field mapping panel
-- `apps/desktop/src/types/database.ts` — expanded frontend deploy result / transaction fields
-- `apps/desktop/src/i18n/locales/en.ts` — new rollback incomplete strings and detect-table-renames strings
-- `apps/desktop/src/i18n/locales/zh-CN.ts` — Chinese strings for rollback incomplete and table rename detection
-- `apps/desktop/src/i18n/locales/zh-TW.ts` — same strings for Traditional Chinese
-- `apps/desktop/src/i18n/locales/es.ts` — same strings for Spanish
-- `apps/desktop/src/i18n/locales/it.ts` — same strings for Italian
-- `apps/desktop/src/i18n/locales/ja.ts` — same strings for Japanese
-- `apps/desktop/src/i18n/locales/pt-BR.ts` — same strings for Brazilian Portuguese
-- `crates/dbx-web/src/state.rs` — added `WebState::for_tests` helper to avoid missing new fields in scattered test fixtures
-- `crates/dbx-web/src/routes/connection.rs` — updated tests to use `WebState::for_tests`
-- `crates/dbx-web/src/routes/mongo.rs` — updated tests to use `WebState::for_tests`
-- `crates/dbx-core/tests/api_contract_verification.rs` — full options initializer updated with `detect_table_renames`
-- `crates/dbx-core/tests/bidirectional_diff_e2e.rs` — rename detection test updated to enable table rename detection explicitly
+- `handoff.md` — this document
+- `deploy/iis/deploy.ps1` — the whole deployment: toolchain preflight (locates a usable MSVC install and `vcvars64.bat`, validates `vcruntime.h` + Windows SDK), `pnpm` build, `cargo build` inside `vcvars64.bat`, staging, config generation with XML validation, app pool / unlock / site / ACL steps, smoke test on `127.0.0.1:4295`, exit 1 when verification fails
+- `deploy/iis/deploy.bat` — entry point; forwards arguments to the script
+- `deploy/iis/web.config` — HttpPlatformHandler template; tokens are `{{DBX_ROOT}}` and `{{DBX_BASE_PATH}}`
+- `deploy/iis/web.config.arr-proxy` — ARR reverse-proxy template; token is `{{DBX_PORT}}`
+- `deploy/iis/README.md` — 11 sections: shape, prerequisites, build, env vars, option A, option B, sub-paths, verify, troubleshooting, locked sections, copying to another server
+- `deploy/iis/README.zh-TW.md` — Traditional Chinese mirror; keep the two in sync
+- `README.md`, `README.zh-CN.md` — one added bullet under Documentation
+- `crates/dbx-web/src/main.rs` — reference only, not modified. Source of truth for `DBX_*` env handling: `DBX_STATIC_DIR` fallback + SPA `not_found_service`, `DBX_PUBLIC_BASE_PATH` normalisation and the explicit `/dbx/` root route (issue #5518), `DBX_PORT` default 4224, bind address `0.0.0.0`, `DBX_DATA_DIR` falling back to `$HOME`
+- `apps/desktop/vite.config.ts` — reference only. Base path defaults to `./`, which is why the staged frontend works at the root or under a sub-path without a rebuild
 
 ## Blocker
-PR #3861 owner review items (2PC fake prepare, structured rollback, status mapping) are implemented on `cmp`.
-Residual risk: no live MySQL/Oracle integration test against a real server for partial DDL failure; classification is covered by pure unit tests + web structured endpoint tests.
-GitHub still may show `mergeable_state: dirty` until rechecked after push.
+Nothing is blocking code work. Three residual risks to be explicit about:
+
+1. **The elevation-only paths are untested.** `deploy.ps1`'s `appcmd add apppool`,
+   `unlock config`, `add site`, `set app`, and `icacls` calls never ran. They are wrapped so a
+   failure warns instead of aborting, and the non-elevated path prints the equivalent commands
+   (that output *was* verified). Someone with administrator rights should run
+   `deploy.bat` once on a real server and confirm the pool, site, and ACL results.
+2. **The staged artifact cannot open SQLCipher-encrypted SQLite files** because it was built
+   with `-NoSqlCipher`. That is a deliberate time-saving choice, not a defect. The default
+   feature set needs the vendored OpenSSL build, which should now work on this machine
+   (see Environment) but has not been re-run.
+3. **`HttpPlatformHandler` was never exercised**, because it is not installed on this machine
+   and installing it needs elevation. `requestTimeout`, `responseBufferLimit`, and WebSocket
+   pass-through are configured from Microsoft's documented behaviour, not measured here.
 
 ## Key Decisions
-- The table structure editor must **not** be modified further in this task.
-- Schema Diff field mapping must use the same type source strategy as table structure editor: `listDataTypes(connectionId, database)` plus `getDataTypeOptions(dbType)` fallback.
-- Do **not** revert to `listDialectDataTypes` for field mapping dropdowns.
-- Cross-database DDL generation must be driven by `DdlDialectProfile` + `type_rewrite`, not by scattered `if Access` / `if Mysql` / `if SqlServer` branches in generators.
-- `profile_for(DatabaseType)` is the only acceptable place to register target-database-specific DDL behavior.
-- Incomplete rollback must remain structurally represented (`rollbackCompleteness`, `missingRollbackObjects`) and blocked in the UI.
-- Schema Diff deploy execution paths must remain unified through a single protected frontend flow using `executeWithProductionSqlGuard`.
-- `two_phase_commit` must never determine partial commit state by re-running `commit()`.
+- **Do not change build targets or CI.** IIS support stays opt-in tooling under `deploy/iis/`.
+  Adding a Windows `dbx-web` release artifact is a product decision for the maintainers.
+- **One source of truth for configuration.** The committed `web.config` files are templates
+  and `deploy.ps1` substitutes the tokens. Never put a `{{TOKEN}}` inside an XML comment —
+  string replacement hits comments too, and `--` inside a comment produces invalid XML. This
+  bug happened during this session; the script's XML validation caught it.
+- **Always build inside `vcvars64.bat` when one is available, including `-NoSqlCipher`.** cc-rs
+  resolves the C toolchain itself and can select a Visual Studio install that is missing its
+  C++ component; the dev-prompt environment pins it to the install whose `INCLUDE` was
+  validated. `-NoSqlCipher` should only change the cargo feature flags, never the build shell.
+  This was a real bug: the first version skipped vcvars in that mode, which would have failed
+  on bundled SQLite and zstd.
+- **Never touch `data\`.** `static\` is build output and is safe to mirror; `data\` holds
+  `dbx.db`, connections, the password hash, downloaded drivers, and the managed JRE. The
+  script refuses to clean anything whose leaf name is not `static`.
+- **Do not ship a password placeholder.** The generated config leaves `DBX_PASSWORD` commented
+  out and relies on the first-run setup page, so no known credential can end up in a config.
+- **App pool idle timeout `0` and recycling disabled** for HttpPlatformHandler mode, because
+  sessions live in memory and a recycle logs every user out.
+- **The SPA deep-link 404 is expected, not a bug to fix.** `GET /any/deep/route` returns the app
+  shell with status 404. Browsers render it; a URL Rewrite meant to "fix" it would break API
+  routing. Documented in both READMEs.
+- **`webSocket` and `serverRuntime` must not appear in `web.config`.** Verified locked on a
+  default install; see Environment.
 
 ## Environment
-- Runtime version: not fully verified locally; Rust workspace compile on this Windows host is limited by missing OpenSSL/Perl toolchain for some crates
-- Relevant env vars: GitHub Actions workflow issues referenced `I18N_BOT_TOKEN`; local work did not rely on it
-- Dev command: `pnpm check` for frontend; Rust checks typically via `cargo check` / `cargo test`
-- Package manager: `pnpm`
-- Platform: Windows local development, CI issues referenced Linux runners
-- Known local limitation: `cargo check` for the full workspace can fail or hang due to OpenSSL build prerequisites (`perl` missing) on this machine
+Hard-won facts about this machine — several contradict earlier assumptions.
+
+- **Platform**: Windows, IIS 10 installed and running (`W3SVC`), `appcmd.exe` present. This
+  session ran **without administrator rights**, so no IIS configuration could be changed.
+- **Visual Studio 18 Community at `D:\Program Files\Microsoft Visual Studio\18\Community` is
+  incomplete**: no `vcvarsall.bat`, no `VC\Tools\MSVC\14.51.36231\include`, no `lib\x64`. Any C
+  build that selects it dies with `vcruntime.h` or `limits.h` not found. `vswhere -requires
+  Microsoft.VisualStudio.Component.VC.Tools.x86.x64` does *not* report it.
+- **Visual Studio 2019 BuildTools at `C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools`
+  is complete** (MSVC 14.29.30133) and is what the preflight selects:
+  `...\VC\Auxiliary\Build\vcvars64.bat`.
+- **Perl and NASM are present** (`C:\Strawberry\perl\bin\perl.exe`, `C:\Strawberry\c\bin\nasm.exe`).
+  The previous handoff claimed `cargo check` failed because "perl is missing" — that diagnosis
+  was wrong. The real cause was a missing `INCLUDE`/`LIB` environment (no developer prompt) plus
+  cc-rs selecting the broken VS 18 install. `cargo check -p dbx-web` inside `vcvars64.bat`
+  now succeeds.
+- **Windows SDK 10.0.19041** lives on `D:\Windows Kits\10` (not under `C:\Program Files (x86)\Windows Kits`).
+- **Default IIS configuration locks** (read from `applicationHost.config` and its trailing
+  `<location path="" overrideMode="Allow">` block, which re-declares `modules` and `handlers`):
+  `handlers` and `modules` are usable in `web.config`; `requestFiltering` is `Allow`;
+  `webSocket` and `serverRuntime` are locked (`serverRuntime` is also `AppHostOnly`, which is why
+  `uploadReadAheadSize` must be set at the server level); `proxy` (ARR) is locked and needs
+  `appcmd unlock config /section:system.webServer/proxy`. `HttpPlatformHandler` is **not**
+  installed here.
+- **Runtime dependencies of the built exe** (`dumpbin /dependents`): system DLLs plus
+  `VCRUNTIME140.dll` and the `api-ms-win-crt-*.dll` set. So a target server needs the Visual C++
+  2015-2022 x64 redistributable, and Windows 10/11 or Server 2016+ for the Universal CRT.
+- **Env vars that matter**: `DBX_DATA_DIR` must be set explicitly on IIS (the app falls back to
+  `$HOME\.dbx-web`, and IIS worker processes have no `HOME`); `DBX_STATIC_DIR` must point at the
+  staged frontend; `DBX_PORT` accepts `%HTTP_PLATFORM_PORT%`. There is **no** `DBX_JAVA_BIN` to
+  set on Windows — Docker sets it at image build time, while Windows resolves a managed JRE under
+  `<DBX_DATA_DIR>\agents\jre-<n>` via the in-app Driver Manager.
+- **`dbx-web` binds `0.0.0.0`**, not loopback, so the ARR mode needs a firewall rule for the
+  backend port.
+- **Release profile is expensive**: `lto = true`, `codegen-units = 1`, `opt-level = "s"` in the
+  root `Cargo.toml`; a release build is ~24 minutes. Do not assume it hung.
+- Useful commands: `deploy\iis\deploy.bat -?`, `… -DryRun`, `… -SkipBuild -SkipIis`,
+  `cargo check -p dbx-web`.
 
 ## Next Steps
-1. Push latest `cmp` and re-request review on PR #3861 with a short reply mapping each review point to commits.
-2. Optionally add live MySQL/Oracle partial-DDL e2e if CI has those services.
-3. Optional architecture cleanup: move function/sequence/rule/owner templates fully into `DdlDialectProfile` data.
+1. On the target server, run `deploy.bat` from an elevated prompt (or execute the printed
+   `appcmd`/`icacls` list) and point an IIS site at `<root>\site`; then create the password on
+   the first-run page.
+2. Rebuild without `-NoSqlCipher` if SQLCipher-encrypted SQLite support is needed: plain
+   `deploy.bat`. Expect roughly 5–15 extra minutes for OpenSSL.
+3. Commit `deploy/iis/` plus the two README link lines when the wording is settled.
+4. Decide whether the project wants an official Windows `dbx-web` artifact; if yes, the release
+   workflow needs a new job (today only `static-browser` builds `dbx-web`, and it is Linux musl).
+5. Optional hardening: try `RUSTFLAGS=-C target-feature=+crt-static` (the Windows 7 job already
+   uses it for the desktop app) so target servers no longer need the VC++ redistributable.
 
 ## For the Next AI
-- Read all Active Files before doing anything.
-- Do NOT change Key Decisions without flagging first.
-- Start from `crates/dbx-core/src/query.rs`; that is the last review blocker that is still not fully solved.
-- Treat the new DDL profile architecture as the canonical direction; do not reintroduce scattered database-specific generator branches.
-- Do not touch table structure editor code.
-- Use the requirements doc in `需求问题/2026年7月24日-结构比对与同步工具-问题与优化方案.md` as the planning baseline.
-
----
-
-✅ handoff.md written to project root.
-Switch to your next tool and run /handoff-load to continue.
-
-Summary:
-- Task: finalize Schema Diff deploy correctness and long-term DDL profile architecture
-- Next step: replace pool-kind DDL atomicity heuristic with database+SQL semantic classification in execute_schema_diff_deploy
-- Blocker: MySQL/Oracle and other non-transactional DDL paths may still report rolled_back too optimistically
+- Read `deploy/iis/README.md` first — §9 lists the locked IIS sections, §11 the copy-to-another-server
+  recipe, §8 the troubleshooting table.
+- Do not add `DBX_PASSWORD` to a committed config, do not "fix" the deep-link 404, and do not put
+  `{{TOKEN}}` inside an XML comment.
+- Do not modify `data\` on any existing deployment, and keep the app pool's idle timeout at `0`.
+- If you change a template, run `deploy.bat -SkipBuild -SkipIis -Force` into a temp
+  `-DeployRoot` and confirm the generated file parses as XML.
+- The elevation-only code paths are the least certain part of `deploy.ps1`; treat a real elevated
+  run on a server as the remaining acceptance test.

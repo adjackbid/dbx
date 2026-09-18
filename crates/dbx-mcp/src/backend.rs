@@ -11,7 +11,7 @@ use dbx_core::{
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, IndexInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
-    storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
+    storage::{DesktopSettings, McpUserPolicy, McpUserPolicyState, Storage, DESKTOP_ACCOUNT_ID},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -54,14 +54,14 @@ fn legacy_mcp_allow_writes() -> Option<bool> {
     }
 }
 
-fn effective_mcp_policy(state: McpGlobalPolicyState) -> McpGlobalPolicy {
+fn effective_mcp_policy(state: McpUserPolicyState) -> McpUserPolicy {
     effective_mcp_policy_with_legacy_allow_writes(state, legacy_mcp_allow_writes())
 }
 
 fn effective_mcp_policy_with_legacy_allow_writes(
-    state: McpGlobalPolicyState,
+    state: McpUserPolicyState,
     legacy_allow_writes: Option<bool>,
-) -> McpGlobalPolicy {
+) -> McpUserPolicy {
     let mut policy = state.policy();
     // When DBX_MCP_ALLOW_WRITES is explicitly set to false by the CLI agent
     // for an unconfirmed run, force read-only regardless of the configured
@@ -89,7 +89,7 @@ pub struct DocsSnapshotOptions {
 
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
-    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
+    async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String>;
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
     async fn execute_agent_tool(
@@ -391,8 +391,8 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
-    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-        self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
+    async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
+        self.state.storage.load_mcp_user_policy(DESKTOP_ACCOUNT_ID).await.map(effective_mcp_policy)
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -451,13 +451,13 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
-        let config = self.state.storage.add_connection_for_mcp(config, "").await?;
+        let config = self.state.storage.add_connection_for_mcp(config, DESKTOP_ACCOUNT_ID).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
         Ok(config)
     }
 
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
-        let removed = self.state.storage.remove_connection_for_mcp(connection_id, "").await?;
+        let removed = self.state.storage.remove_connection_for_mcp(connection_id, DESKTOP_ACCOUNT_ID).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
         }
@@ -562,10 +562,10 @@ impl DbxBackend for LocalBackend {
 
 #[async_trait]
 impl DbxBackend for WebBackend {
-    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+    async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
         self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None)
             .await?
-            .json::<McpGlobalPolicyState>()
+            .json::<McpUserPolicyState>()
             .await
             .map(effective_mcp_policy)
             .map_err(|error| format!("Invalid MCP policy response: {error}"))
@@ -1507,8 +1507,8 @@ mod tests {
         time::Duration,
     };
 
-    fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
-        McpGlobalPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
+    fn policy_state(configured: bool, read_only: bool) -> McpUserPolicyState {
+        McpUserPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
     }
 
     #[test]
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for StubBackend {
-        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
             Err("unused".to_string())
         }
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {

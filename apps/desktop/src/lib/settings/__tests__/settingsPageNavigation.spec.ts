@@ -11,4 +11,9 @@ describe("settings page navigation", () => {
     expect(settingsDialogSource).toContain("navigationRequestId?: number;");
     expect(settingsDialogSource).toMatch(/watch\(\s*\(\) => props\.navigationRequestId,/);
   });
+
+  it("hides the admin-only About tab from non-admins in Web mode", () => {
+    // The About tab hosts "Reset All Defaults", which is an instance-wide action.
+    expect(settingsDialogSource).toContain('...(isWeb && !userStore.isAdmin ? [] : [{ value: "about" as const');
+  });
 });

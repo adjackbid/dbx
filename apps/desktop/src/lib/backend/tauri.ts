@@ -193,7 +193,7 @@ export interface DesktopSettings {
   sidebar_table_page_size?: number | null;
 }
 
-export interface McpGlobalPolicy {
+export interface McpUserPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
@@ -551,12 +551,12 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
   return invoke("save_desktop_settings", { settings });
 }
 
-export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
-  return invoke("load_mcp_global_policy");
+export async function loadMcpUserPolicy(): Promise<McpUserPolicy> {
+  return invoke("load_mcp_user_policy");
 }
 
-export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
-  return invoke("save_mcp_global_policy", { policy });
+export async function saveMcpUserPolicy(policy: Omit<McpUserPolicy, "configured">): Promise<void> {
+  return invoke("save_mcp_user_policy", { policy });
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {

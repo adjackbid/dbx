@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DBX Web on IIS using ARR + URL Rewrite as a reverse proxy.
+
+  Use this when dbx-web.exe runs as a Windows service (WinSW, sc.exe, or Task
+  Scheduler) instead of being launched by IIS. IIS then only forwards traffic, so
+  app pool recycling no longer restarts DBX and kills in-memory sessions.
+
+  This is a template. deploy.ps1 substitutes the DBX_PORT token and writes the result to
+  <root>\site\web.config. If you copy it by hand, replace that token yourself.
+
+  Requirements:
+    - Application Request Routing (ARR) 3.0+ and URL Rewrite 2.x
+    - WebSocket Protocol feature enabled (needed by /api/redis/pubsub/ws).
+      Do not set <webSocket> here: that section is locked at the server level and the
+      default is already enabled.
+    - ARR proxy enabled at the server level. The proxy section is locked by default;
+      unlock it before using the <proxy> element below:
+        %windir%\system32\inetsrv\appcmd.exe unlock config /section:system.webServer/proxy
+-->
+<configuration>
+  <system.webServer>
+    <rewrite>
+      <rules>
+        <!-- {R:1} keeps any application prefix, so an app mounted at /dbx still
+             forwards /dbx/... to the backend. Do not strip the prefix when
+             DBX_PUBLIC_BASE_PATH is set. -->
+        <rule name="DBX Web reverse proxy" stopProcessing="true">
+          <match url="(.*)" />
+          <action type="Rewrite" url="http://127.0.0.1:{{DBX_PORT}}/{R:1}" />
+        </rule>
+      </rules>
+    </rewrite>
+
+    <!-- timeout and responseBufferLimit also exist in IIS Manager:
+         Application Request Routing Cache -> Server Proxy Settings. -->
+    <proxy enabled="true"
+           preserveHostHeader="true"
+           timeout="02:00:00"
+           responseBufferLimit="0" />
+
+    <security>
+      <requestFiltering>
+        <!-- IIS default is 30 MB (30000000). Keep at or above DBX_MAX_UPLOAD_MB. -->
+        <requestLimits maxAllowedContentLength="2147483648" />
+      </requestFiltering>
+    </security>
+  </system.webServer>
+</configuration>

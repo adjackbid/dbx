@@ -16,15 +16,17 @@ pub struct SaveTunnelProfilesRequest {
 
 pub async fn load_tunnel_profiles(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
 ) -> Result<Json<Vec<TransportLayerConfig>>, AppError> {
-    state.app.storage.load_tunnel_profiles().await.map(Json).map_err(AppError::from)
+    state.app.storage.load_tunnel_profiles(&session.user_id).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_tunnel_profiles(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(body): Json<SaveTunnelProfilesRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_tunnel_profiles(&body.profiles).await.map(Json).map_err(AppError::from)
+    state.app.storage.save_tunnel_profiles(&body.profiles, &session.user_id).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn test_tunnel_profile(

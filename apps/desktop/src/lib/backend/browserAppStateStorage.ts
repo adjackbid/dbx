@@ -14,6 +14,10 @@ export function setCurrentUserId(id: string | null) {
   currentUserId = id;
 }
 
+export function getCurrentUserId(): string | null {
+  return currentUserId;
+}
+
 function currentUserScope(key: string): string {
   return currentUserId ? `u_${currentUserId}:${key}` : key;
 }
@@ -107,7 +111,14 @@ export async function clearAllBrowserAppState(): Promise<void> {
     }
   }
   // Also clear known legacy keys
-  for (const key of ["dbx-editor-settings"]) {
+  for (const key of ["dbx-editor-settings", "dbx-desktop-settings"]) {
     localStorage.removeItem(key);
+  }
+  // Per-user desktop settings keys (`dbx-desktop-settings:u_{id}`)
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("dbx-desktop-settings:")) {
+      localStorage.removeItem(key);
+    }
   }
 }

@@ -1387,6 +1387,9 @@ function setSidebarActivation(value: "single" | "double") {
 const activeSettingsTab = ref("appearance");
 const settingsContentScrollRef = ref<HTMLElement | null>(null);
 const isWeb = !isTauriRuntime();
+/// Instance-wide settings (AI limits, restore-all-defaults) belong to the Web
+/// admin; a desktop install has a single operator and keeps them enabled.
+const canManageInstanceSettings = computed(() => !isWeb || userStore.isAdmin);
 const appSupportInfo = ref<AppSupportInfo | null>(null);
 const appSupportInfoLoading = ref(false);
 const appSupportInfoError = ref("");
@@ -1423,7 +1426,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
         { value: "backup-restore" as const, label: "Backup & Restore" },
       ]
     : []),
-  { value: "about", label: t("settings.aboutTab") },
+  ...(isWeb && !userStore.isAdmin ? [] : [{ value: "about" as const, label: t("settings.aboutTab") }]),
 ]);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
 
@@ -1688,9 +1691,9 @@ const mcpPolicyLoadError = ref("");
 const mcpInstalling = ref(false);
 const mcpInstallMessage = ref("");
 const mcpInstallError = ref(false);
-const mcpExecutionMode = computed(() => mcpExecutionModeFromPolicy(settingsStore.mcpGlobalPolicy));
+const mcpExecutionMode = computed(() => mcpExecutionModeFromPolicy(settingsStore.mcpUserPolicy));
 const mcpExecutionModeOptions: McpExecutionMode[] = ["read_only", "safe_write", "high_risk_write"];
-const mcpAllowedConnectionIds = computed(() => settingsStore.mcpGlobalPolicy.allowedConnectionIds);
+const mcpAllowedConnectionIds = computed(() => settingsStore.mcpUserPolicy.allowedConnectionIds);
 const mcpSelectableConnections = computed(() => connectionStore.connections);
 const mcpPolicyControlsDisabled = computed(() =>
   isMcpPolicyMutationBlocked({
@@ -1704,7 +1707,7 @@ async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: 
   if (mcpPolicyControlsDisabled.value) return;
   mcpPolicySaving.value = true;
   try {
-    await settingsStore.updateMcpGlobalPolicy(partial);
+    await settingsStore.updateMcpUserPolicy(partial);
   } catch (e: any) {
     toast(t("settings.mcpPolicySaveFailed", { error: e?.message || String(e) }), 5000);
   } finally {
@@ -2260,11 +2263,11 @@ watch(
       newPassword.value = "";
       confirmNewPassword.value = "";
       try {
-        await settingsStore.initMcpGlobalPolicy(true);
-        if (!settingsStore.mcpGlobalPolicy.configured && localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true") {
-          await settingsStore.updateMcpGlobalPolicy({ readOnly: true });
+        await settingsStore.initMcpUserPolicy(true);
+        if (!settingsStore.mcpUserPolicy.configured && localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true") {
+          await settingsStore.updateMcpUserPolicy({ readOnly: true });
         }
-        if (settingsStore.mcpGlobalPolicy.configured) localStorage.removeItem(MCP_READONLY_STORAGE_KEY);
+        if (settingsStore.mcpUserPolicy.configured) localStorage.removeItem(MCP_READONLY_STORAGE_KEY);
         localStorage.removeItem(MCP_SCOPE_CONNECTION_STORAGE_KEY);
       } catch (e: any) {
         mcpPolicyLoadError.value = e?.message || String(e);
@@ -5597,7 +5600,7 @@ onUnmounted(() => {
                   </p>
                 </div>
                 <div class="flex items-center gap-2">
-                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving" />
+                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || !canManageInstanceSettings" />
                   <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
                     {{
                       t("ai.maxAgentTurnsRange", {
@@ -5611,10 +5614,13 @@ onUnmounted(() => {
                   <Button v-if="maxAgentTurnsLoadError" type="button" size="sm" variant="outline" :disabled="maxAgentTurnsLoading" @click="loadMaxAgentTurnsSetting">
                     {{ t("common.retry") }}
                   </Button>
-                  <Button type="button" size="sm" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
+                  <Button v-if="canManageInstanceSettings" type="button" size="sm" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
                     {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>
+                <p v-if="!canManageInstanceSettings" class="text-xs text-muted-foreground">
+                  {{ t("settings.adminOnlySetting") }}
+                </p>
               </div>
 
               <!-- Default AI Mode (list mode, global) -->
@@ -5653,7 +5659,7 @@ onUnmounted(() => {
                   </p>
                 </div>
                 <div class="flex items-center gap-2">
-                  <Input v-model.number="editMaxRetries" type="number" min="0" max="10" step="1" class="h-8 w-32 text-xs" placeholder="2" :disabled="!maxRetriesLoaded || maxRetriesSaving" />
+                  <Input v-model.number="editMaxRetries" type="number" min="0" max="10" step="1" class="h-8 w-32 text-xs" placeholder="2" :disabled="!maxRetriesLoaded || maxRetriesSaving || !canManageInstanceSettings" />
                   <span class="text-xs" :class="maxRetriesOutOfRange(editMaxRetries) ? 'text-destructive' : 'text-muted-foreground'">
                     {{ t("ai.maxRetriesRange", { min: 0, max: 10, default: 2 }) }}
                   </span>
@@ -5661,10 +5667,13 @@ onUnmounted(() => {
                   <Button v-if="maxRetriesLoadError" type="button" size="sm" variant="outline" :disabled="maxRetriesLoading" @click="loadMaxRetriesSetting">
                     {{ t("common.retry") }}
                   </Button>
-                  <Button type="button" size="sm" :disabled="!maxRetriesLoaded || maxRetriesSaving || maxRetriesOutOfRange(editMaxRetries)" @click="saveMaxRetriesSetting">
+                  <Button v-if="canManageInstanceSettings" type="button" size="sm" :disabled="!maxRetriesLoaded || maxRetriesSaving || maxRetriesOutOfRange(editMaxRetries)" @click="saveMaxRetriesSetting">
                     {{ maxRetriesSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>
+                <p v-if="!canManageInstanceSettings" class="text-xs text-muted-foreground">
+                  {{ t("settings.adminOnlySetting") }}
+                </p>
               </div>
 
               <!-- Global Custom Instructions (list mode) -->

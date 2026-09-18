@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use super::connection::AppState;
 pub use dbx_core::ai::*;
+use dbx_core::storage::DESKTOP_ACCOUNT_ID;
 
 #[tauri::command]
 pub async fn ai_test_connection(
@@ -44,12 +45,12 @@ pub async fn ai_resolve_model_effort(
 
 #[tauri::command]
 pub async fn save_ai_config(state: State<'_, Arc<AppState>>, config: AiConfig) -> Result<(), String> {
-    state.storage.save_ai_config(&config).await
+    state.storage.save_ai_config(&config, DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
 pub async fn load_ai_config(state: State<'_, Arc<AppState>>) -> Result<Option<AiConfig>, String> {
-    state.storage.load_ai_config().await
+    state.storage.load_ai_config(DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
@@ -62,14 +63,14 @@ pub async fn save_ai_provider_config(
         .map_err(|_| format!("Invalid AI provider: {provider}"))?;
     let mut config = config;
     config.provider = parsed_provider;
-    state.storage.save_ai_provider_config(&provider, &config).await
+    state.storage.save_ai_provider_config(&provider, &config, DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
 pub async fn load_ai_provider_configs(
     state: State<'_, Arc<AppState>>,
 ) -> Result<std::collections::HashMap<String, AiConfig>, String> {
-    state.storage.load_ai_provider_configs().await
+    state.storage.load_ai_provider_configs(DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
@@ -77,12 +78,12 @@ pub async fn save_ai_chat_selection(
     state: State<'_, Arc<AppState>>,
     selection: AiChatSelectionState,
 ) -> Result<(), String> {
-    state.storage.save_ai_chat_selection(&selection).await
+    state.storage.save_ai_chat_selection(&selection, DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
 pub async fn load_ai_chat_selection(state: State<'_, Arc<AppState>>) -> Result<Option<AiChatSelectionState>, String> {
-    state.storage.load_ai_chat_selection().await
+    state.storage.load_ai_chat_selection(DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]

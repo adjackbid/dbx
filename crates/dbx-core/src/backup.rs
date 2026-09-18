@@ -192,7 +192,7 @@ pub async fn export_backup(
     }
 
     if include.contains(&"prompt_templates".to_string()) {
-        let templates = storage.load_prompt_templates().await?;
+        let templates = storage.load_prompt_templates(user_id).await?;
         let json = serde_json::to_string(&templates).map_err(|e| e.to_string())?;
         zip.start_file("prompt_templates.json", options).map_err(|e| e.to_string())?;
         zip.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
@@ -306,7 +306,7 @@ pub async fn import_backup(
                     serde_json::from_slice(&data).map_err(|e| format!("Invalid templates data: {e}"))?;
                 summary.prompt_templates = templates.len();
                 for template in templates {
-                    storage.save_prompt_template(&template.id, &template.name, &template.content).await?;
+                    storage.save_prompt_template(&template.id, &template.name, &template.content, user_id).await?;
                 }
             }
             "history.json" => {

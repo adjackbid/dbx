@@ -42,7 +42,7 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
     }
     ```
 
-    如果使用全局安装，可将 `command` 改为 `dbx-mcp-server`。连接 allowlist 和执行权限统一在 **DBX 设置 → MCP** 中管理，常规客户端配置不需要权限环境变量。Windows 便携版请将 `DBX_DATA_DIR` 设置为 `DBX.exe` 同级的 `data` 目录。
+    如果使用全局安装，可将 `command` 改为 `dbx-mcp-server`。连接 allowlist 和执行权限按登录账号在 **DBX 设置 → MCP** 中管理；DBX Web 中每个账号各自维护自己的 allowlist 与执行权限。常规客户端配置不需要权限环境变量。Windows 便携版请将 `DBX_DATA_DIR` 设置为 `DBX.exe` 同级的 `data` 目录。
   </Step>
   <Step>
     ### 开始使用
@@ -136,7 +136,7 @@ DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 D
 
 ## 安全和环境变量
 
-DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时重新读取：
+DBX 在 **设置 → MCP** 中按登录账号各保存一份 MCP 策略，并在每次请求时重新读取。MCP 客户端使用它登录账号的策略，因此连接 allowlist 和执行权限始终属于该账号：
 
 | 权限模式 | 允许的操作 |
 | --- | --- |
@@ -146,7 +146,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 
 `WHERE TRUE`、`WHERE 1 = 1`、`_id: {$exists: true}` 或不透明 MongoDB 过滤器仍按高风险处理。连接自身只读、生产库保护、数据库账号权限和 MCP 连接 allowlist 在任何模式下都是权限上限。
 
-新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后仅以中央策略为准，并忽略旧权限变量。旧连接 scope 变量只能进一步收窄 DBX allowlist。
+新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 策略。为兼容升级，在账号策略首次保存前，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后仅以该账号策略为准，并忽略旧权限变量。旧连接 scope 变量只能进一步收窄 DBX allowlist。
 
 | 变量 | 用途 |
 | --- | --- |

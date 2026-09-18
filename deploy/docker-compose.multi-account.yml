@@ -24,7 +24,7 @@ services:
       dockerfile: deploy/Dockerfile
     container_name: dbx-multi-account
     ports:
-      - "127.0.0.1:4230:4230"
+      - "0.0.0.0:4230:4230"
     environment:
       # Do NOT set DBX_PASSWORD — the multi-account version uses an
       # interactive setup flow on first login to create the admin account.

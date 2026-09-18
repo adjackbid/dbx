@@ -33,8 +33,14 @@ describe("agent turn limit loading", () => {
     const aiTabBranch = settingsDialogSource.slice(aiTabStart, settingsDialogSource.indexOf('if (tab === "about"', aiTabStart));
     expect(aiTabBranch.indexOf("void loadMaxAgentTurnsSetting()")).toBeLessThan(aiTabBranch.indexOf("await promptTemplateStore.ensureLoaded()"));
     expect(settingsDialogSource).toContain("if (!maxAgentTurnsLoaded.value) return;");
-    expect(settingsDialogSource).toContain(':disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving"');
+    expect(settingsDialogSource).toContain(':disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || !canManageInstanceSettings"');
     expect(settingsDialogSource).toContain(':disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)"');
+  });
+
+  it("keeps the instance-wide turn limit read-only for non-admins in Web mode", () => {
+    expect(settingsDialogSource).toContain('v-if="canManageInstanceSettings"');
+    expect(settingsDialogSource).toContain('t("settings.adminOnlySetting")');
+    expect(settingsDialogSource).toContain("const canManageInstanceSettings = computed(() => !isWeb || userStore.isAdmin)");
   });
 
   it("keeps failed loads retryable instead of replacing them with the default", () => {

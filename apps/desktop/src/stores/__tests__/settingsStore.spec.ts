@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
-import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpUserPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
@@ -304,9 +304,9 @@ describe("normalizeDesktopSettings", () => {
   });
 });
 
-describe("normalizeMcpGlobalPolicy", () => {
+describe("normalizeMcpUserPolicy", () => {
   it("defaults to all connections with writes allowed", () => {
-    expect(normalizeMcpGlobalPolicy(undefined)).toEqual({
+    expect(normalizeMcpUserPolicy(undefined)).toEqual({
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: null,
@@ -316,7 +316,7 @@ describe("normalizeMcpGlobalPolicy", () => {
 
   it("normalizes and deduplicates an explicit connection allowlist", () => {
     expect(
-      normalizeMcpGlobalPolicy({
+      normalizeMcpUserPolicy({
         readOnly: true,
         allowDangerousSql: true,
         allowedConnectionIds: [" connection-1 ", "connection-1", "", "connection-2"],
@@ -331,7 +331,7 @@ describe("normalizeMcpGlobalPolicy", () => {
   });
 
   it("preserves an empty allowlist as deny all", () => {
-    expect(normalizeMcpGlobalPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
+    expect(normalizeMcpUserPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
   });
 });
 
@@ -514,13 +514,13 @@ describe("settingsStore MCP policy persistence", () => {
 
   it("rolls an optimistic policy update back when persistence fails", async () => {
     let rejectSave!: (reason?: unknown) => void;
-    const saveMcpGlobalPolicy = vi.fn(
+    const saveMcpUserPolicy = vi.fn(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectSave = reject;
         }),
     );
-    vi.doMock("@/lib/backend/api", () => ({ saveMcpGlobalPolicy }));
+    vi.doMock("@/lib/backend/api", () => ({ saveMcpUserPolicy }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
@@ -530,13 +530,13 @@ describe("settingsStore MCP policy persistence", () => {
       allowedConnectionIds: ["connection-1"],
       configured: true,
     };
-    store.mcpGlobalPolicy = previous;
+    store.mcpUserPolicy = previous;
 
-    const update = store.updateMcpGlobalPolicy({
+    const update = store.updateMcpUserPolicy({
       readOnly: false,
       allowedConnectionIds: [],
     });
-    expect(store.mcpGlobalPolicy).toEqual({
+    expect(store.mcpUserPolicy).toEqual({
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: [],
@@ -545,7 +545,7 @@ describe("settingsStore MCP policy persistence", () => {
 
     rejectSave(new Error("save failed"));
     await expect(update).rejects.toThrow("save failed");
-    expect(store.mcpGlobalPolicy).toEqual(previous);
+    expect(store.mcpUserPolicy).toEqual(previous);
   });
 });
 

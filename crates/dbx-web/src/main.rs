@@ -864,7 +864,7 @@ async fn main() {
         )
         .route(
             "/app-settings/mcp-policy",
-            get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
+            get(routes::app_settings::load_mcp_user_policy).put(routes::app_settings::save_mcp_user_policy),
         )
         .route(
             "/app-settings/max-agent-turns",

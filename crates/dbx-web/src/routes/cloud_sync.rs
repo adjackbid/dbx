@@ -120,10 +120,23 @@ pub struct SaveSnippetSyncIdRequest {
     pub snippet_id: Option<String>,
 }
 
+/// Cloud sync stores instance-wide credentials (WebDAV account, sync secrets
+/// passphrase, snippet token) and restores whole-instance snapshots. In Web
+/// deployments only an admin may reach it; the Sync tab itself is desktop-only.
+fn require_admin(session: &crate::state::UserSession) -> Result<(), AppError> {
+    if session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("Cloud sync can only be managed by an administrator"))
+    }
+}
+
 pub async fn webdav_sync_test(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<WebDavConfigRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     WebDavClient::new(req.config).test().await.map_err(AppError::from)?;
     Ok(Json(()))
@@ -131,37 +144,47 @@ pub async fn webdav_sync_test(
 
 pub async fn webdav_password_status(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<WebDavConfigRequest>,
 ) -> Result<Json<WebDavPasswordStatus>, AppError> {
+    require_admin(&session)?;
     webdav_saved_password_status(&state.app.storage, &req.config).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_webdav_saved_password(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SaveWebDavPasswordRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     save_webdav_password(&state.app.storage, &req.config, &req.password).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn forget_webdav_saved_password(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<WebDavConfigRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     forget_webdav_password(&state.app.storage, &req.config).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn webdav_sync_secrets_status(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
 ) -> Result<Json<WebDavSyncSecretsStatus>, AppError> {
+    require_admin(&session)?;
     core_webdav_sync_secrets_status(&state.app.storage).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_webdav_sync_secrets_preference(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<WebDavSyncSecretsPreferenceRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     core_save_webdav_sync_secrets_preference(&state.app.storage, req.enabled, req.passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
@@ -175,8 +198,10 @@ pub async fn forget_webdav_sync_secrets_passphrase(State(state): State<Arc<WebSt
 
 pub async fn webdav_sync_upload(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<WebDavUploadRequest>,
 ) -> Result<Json<WebDavSyncSummary>, AppError> {
+    require_admin(&session)?;
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let snapshot = build_sync_snapshot_with_saved_secrets(
         &state.app.storage,
@@ -191,8 +216,10 @@ pub async fn webdav_sync_upload(
 
 pub async fn webdav_sync_download(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<WebDavDownloadRequest>,
 ) -> Result<Json<WebDavDownloadResult>, AppError> {
+    require_admin(&session)?;
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let (snapshot, summary) = WebDavClient::new(req.config).get_snapshot().await.map_err(AppError::from)?;
     let explicit_passphrase = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
@@ -221,8 +248,10 @@ pub async fn webdav_sync_download(
 
 pub async fn snippet_sync_test(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<SnippetConfigRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     SnippetSyncClient::new(req.config).test().await.map_err(AppError::from)?;
     Ok(Json(()))
@@ -230,38 +259,48 @@ pub async fn snippet_sync_test(
 
 pub async fn snippet_token_status(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SnippetConfigRequest>,
 ) -> Result<Json<SnippetTokenStatus>, AppError> {
+    require_admin(&session)?;
     snippet_saved_token_status(&state.app.storage, &req.config).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_snippet_saved_token(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SaveSnippetTokenRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     save_snippet_token(&state.app.storage, &req.config, &req.token).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn forget_snippet_saved_token(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SnippetConfigRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     forget_snippet_token(&state.app.storage, &req.config).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn snippet_sync_settings(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SnippetSyncSettingsRequest>,
 ) -> Result<Json<SnippetSyncSettings>, AppError> {
+    require_admin(&session)?;
     core_snippet_sync_settings(&state.app.storage, req.provider).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_snippet_sync_id(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<SaveSnippetSyncIdRequest>,
 ) -> Result<Json<()>, AppError> {
+    require_admin(&session)?;
     core_save_snippet_sync_id(&state.app.storage, req.provider, req.snippet_id.as_deref())
         .await
         .map_err(AppError::from)?;
@@ -270,8 +309,10 @@ pub async fn save_snippet_sync_id(
 
 pub async fn retry_snippet_legacy_cleanup(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<SnippetConfigRequest>,
 ) -> Result<Json<SnippetSyncSettings>, AppError> {
+    require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let provider = req.config.provider;
     let client = SnippetSyncClient::new(req.config);
@@ -280,8 +321,10 @@ pub async fn retry_snippet_legacy_cleanup(
 
 pub async fn snippet_sync_upload(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<SnippetUploadRequest>,
 ) -> Result<Json<SnippetSyncSummary>, AppError> {
+    require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let secrets_passphrase = if req.include_secrets {
         Some(
@@ -309,8 +352,10 @@ pub async fn snippet_sync_upload(
 
 pub async fn snippet_sync_download(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(mut req): Json<SnippetDownloadRequest>,
 ) -> Result<Json<SnippetDownloadResult>, AppError> {
+    require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let (snapshot, summary) = SnippetSyncClient::new(req.config)
         .get_snapshot(req.snippet_passphrase.as_deref())
@@ -346,6 +391,55 @@ mod tests {
 
     use crate::state::WebState;
 
+    fn session(is_admin: bool) -> crate::state::UserSession {
+        crate::state::UserSession {
+            user_id: if is_admin { "admin-1" } else { "user-1" }.to_string(),
+            username: "tester".to_string(),
+            display_name: String::new(),
+            is_admin,
+            auth_source: dbx_core::user::AuthSource::Local,
+            created_at: 0,
+            last_accessed_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_sync_credentials_reject_non_admin_sessions() {
+        let dir = std::env::temp_dir().join(format!("dbx-web-cloud-sync-admin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
+
+        let denied = super::webdav_sync_secrets_status(State(state.clone()), axum::extract::Extension(session(false)))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.status, axum::http::StatusCode::FORBIDDEN);
+
+        let denied = super::snippet_token_status(
+            State(state.clone()),
+            axum::extract::Extension(session(false)),
+            Json(super::SnippetConfigRequest {
+                config: dbx_core::cloud_sync::SnippetSyncConfig {
+                    provider: SnippetProvider::GitHub,
+                    token: None,
+                    snippet_id: None,
+                    replace_legacy_snippet: false,
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.status, axum::http::StatusCode::FORBIDDEN);
+
+        // An admin session still reaches the same endpoints.
+        let _ = super::webdav_sync_secrets_status(State(state.clone()), axum::extract::Extension(session(true)))
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn snippet_settings_surfaces_pending_cleanup_after_restart() {
         let dir = std::env::temp_dir().join(format!("dbx-web-snippet-cleanup-{}", uuid::Uuid::new_v4()));
@@ -360,6 +454,15 @@ mod tests {
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         let Json(settings) = super::snippet_sync_settings(
             State(state),
+            axum::extract::Extension(crate::state::UserSession {
+                user_id: "test-admin".to_string(),
+                username: "admin".to_string(),
+                display_name: "Admin".to_string(),
+                is_admin: true,
+                auth_source: dbx_core::user::AuthSource::Local,
+                created_at: 0,
+                last_accessed_at: 0,
+            }),
             Json(super::SnippetSyncSettingsRequest { provider: SnippetProvider::GitHub }),
         )
         .await

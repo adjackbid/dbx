@@ -30,6 +30,10 @@ impl AppError {
         Self::with_status(msg.into(), StatusCode::NOT_FOUND)
     }
 
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::with_status(msg.into(), StatusCode::FORBIDDEN)
+    }
+
     fn with_status(message: String, status: StatusCode) -> Self {
         let error = BackendError::from_legacy_string(&message);
         Self { message, status, error: Box::new(error) }

@@ -62,7 +62,7 @@ import type {
   UpgradeAllAgentDriversResult,
   AgentUpdateBlocker,
   DesktopSettings,
-  McpGlobalPolicy,
+  McpUserPolicy,
   SavedSqlSyncRequest,
   DriverInstallProgress,
   JavaRuntimeConfig,
@@ -160,7 +160,7 @@ import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
-import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
+import { getCurrentUserId, loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
 import type { DataGridSavePreparation } from "@/lib/backend/tauri";
@@ -210,6 +210,12 @@ import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 // ---------------------------------------------------------------------------
 
 const DESKTOP_SETTINGS_STORAGE_KEY = "dbx-desktop-settings";
+
+/// Desktop/UI preferences are personal. In shared browsers they must not leak
+/// between accounts, so the key follows the signed-in user once known.
+function desktopSettingsStorageKey(): string {
+  return getCurrentUserId() ? `${DESKTOP_SETTINGS_STORAGE_KEY}:u_${getCurrentUserId()}` : DESKTOP_SETTINGS_STORAGE_KEY;
+}
 const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
   icon_theme: "default",
@@ -1507,7 +1513,7 @@ export async function deleteAiConfig(configId: string): Promise<void> {
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
   try {
-    const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);
+    const raw = safeLocalStorageGet(desktopSettingsStorageKey());
     return raw
       ? {
           ...DEFAULT_DESKTOP_SETTINGS,
@@ -1520,14 +1526,14 @@ export async function loadDesktopSettings(): Promise<DesktopSettings> {
 }
 
 export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
-  safeLocalStorageSet(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
+  safeLocalStorageSet(desktopSettingsStorageKey(), JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
 }
 
-export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
+export async function loadMcpUserPolicy(): Promise<McpUserPolicy> {
   return get("/api/app-settings/mcp-policy");
 }
 
-export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
+export async function saveMcpUserPolicy(policy: Omit<McpUserPolicy, "configured">): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/mcp-policy"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

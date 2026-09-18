@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dbx_core::{
     agent_events::ToolResult, agent_tools::AgentSqlPermissions, models::connection::ConnectionConfig,
-    storage::McpGlobalPolicy,
+    storage::McpUserPolicy,
 };
 use dbx_mcp::{DbxBackend, DbxMcpServer, McpScope};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
@@ -13,8 +13,8 @@ struct EmptyBackend;
 
 #[async_trait]
 impl DbxBackend for EmptyBackend {
-    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-        Ok(McpGlobalPolicy::default())
+    async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
+        Ok(McpUserPolicy::default())
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -48,13 +48,13 @@ impl DbxBackend for EmptyBackend {
 }
 
 struct PolicyBackend {
-    policy: McpGlobalPolicy,
+    policy: McpUserPolicy,
     connections: Vec<ConnectionConfig>,
 }
 
 #[async_trait]
 impl DbxBackend for PolicyBackend {
-    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+    async fn load_mcp_policy(&self) -> Result<McpUserPolicy, String> {
         Ok(self.policy.clone())
     }
 
@@ -128,9 +128,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 }
 
 #[tokio::test]
-async fn enforces_global_connection_scope_and_read_only_policy() {
+async fn enforces_scoped_connection_and_read_only_policy() {
     let backend = PolicyBackend {
-        policy: McpGlobalPolicy {
+        policy: McpUserPolicy {
             read_only: true,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["allowed".to_string()]),

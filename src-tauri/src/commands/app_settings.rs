@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
+use dbx_core::storage::{DesktopSettings, McpUserPolicy, McpUserPolicyState};
 use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
@@ -122,13 +122,13 @@ pub async fn save_pinned_tree_node_ids(state: State<'_, Arc<AppState>>, ids: Vec
 }
 
 #[tauri::command]
-pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<McpGlobalPolicyState, String> {
-    state.storage.load_mcp_global_policy().await
+pub async fn load_mcp_user_policy(state: State<'_, Arc<AppState>>) -> Result<McpUserPolicyState, String> {
+    state.storage.load_mcp_user_policy(dbx_core::storage::DESKTOP_ACCOUNT_ID).await
 }
 
 #[tauri::command]
-pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
-    state.storage.save_mcp_global_policy(&policy).await
+pub async fn save_mcp_user_policy(state: State<'_, Arc<AppState>>, policy: McpUserPolicy) -> Result<(), String> {
+    state.storage.save_mcp_user_policy(dbx_core::storage::DESKTOP_ACCOUNT_ID, &policy).await
 }
 
 #[tauri::command]

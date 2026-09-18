@@ -131,7 +131,7 @@ These pages are for inspection and troubleshooting, not long-term monitoring. Us
 
 ## Safety and Compatibility Boundaries
 
-- Specialized workspaces respect connection read-only state; MCP-exposed specialized commands also follow the global MCP policy.
+- Specialized workspaces respect connection read-only state; MCP-exposed specialized commands also follow the MCP policy of the account that owns the connection.
 - Production protection still applies to writes recognized by DBX, while database privileges remain the final boundary.
 - Drivers expose only capabilities they can implement reliably, so tabs can differ even within one category.
 - Management APIs and data protocols can use different ports, such as RabbitMQ Management API or the Nacos console API.

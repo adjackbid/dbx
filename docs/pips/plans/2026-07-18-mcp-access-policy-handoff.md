@@ -1,5 +1,14 @@
 # MCP 中央访问策略交接说明
 
+## 后续变更（2026-09）
+
+MCP 策略已从「全实例单份」改为「按账号一份」：
+
+- 连接范围（`allowedConnectionIds`）与执行权限（`readOnly`、`allowDangerousSql`）改为保存在 `user_settings` 的 `mcp_policy` 键，按 `user_id` 隔离；桌面版沿用空账号 ID。
+- Web API `GET/PUT /api/app-settings/mcp-policy` 以登录会话的账号为作用域；Web 端执行边界按连接所属账号解析策略。
+- 旧 `app_settings.settings_json.mcp_global_policy` 在打开数据库时一次性迁移给原有归属账号（桌面数据仍属空账号时归空账号，否则归最早的管理员），迁移后删除该键；无法解析的旧值迁移为只读，保持失败关闭。
+- 其他账号不再继承旧的全实例 allowlist，避免出现 allowlist 指向他人连接、导致自身 MCP 全部被拒的情况。
+
 ## 文档状态
 
 - 日期：2026-07-18

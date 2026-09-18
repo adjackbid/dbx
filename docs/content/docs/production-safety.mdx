@@ -15,7 +15,7 @@ DBX separates write safety into independent layers: database privileges, connect
 | Connection read-only | Blocks recognizable writes in the DBX core query path and disables multiple mutation entry points | AI, CLI, MCP, and the normal UI cannot widen it |
 | Production protection | Marks an entire connection or selected databases as production and requires a fresh confirmation for writes | Normal confirmation and Agent authorization cannot permanently skip it |
 | Dangerous SQL/command confirmation | Adds prompts or blocks for DDL, unbounded mutations, risky Redis commands, and similar operations | Controlled by its setting, but never widens read-only or production protection |
-| Global MCP policy | Restricts all MCP clients through a connection allowlist and three execution modes | Client environment variables cannot widen the saved central policy |
+| Per-account MCP policy | Restricts the MCP clients of one account through a connection allowlist and three execution modes | Client environment variables cannot widen the saved account policy |
 
 ## Configure a Read-Only Connection
 
@@ -93,7 +93,7 @@ See [AI Assistant](/en/docs/ai-assistant) for SQL classification and mode detail
 
 ## MCP Permissions
 
-DBX stores one central policy under **Settings → MCP**, and every MCP request reloads that policy.
+DBX stores one MCP policy per account under **Settings → MCP**, and every MCP request reloads the policy of the account the client authenticated as.
 
 | Mode | Representative operations |
 | --- | --- |
@@ -101,7 +101,7 @@ DBX stores one central policy under **Settings → MCP**, and every MCP request 
 | Data read/write | Regular inserts, effectively filtered updates/deletes, scoped MongoDB mutations, ordinary Redis writes, and connection management |
 | Full access | Also allows broad mutations, DDL, `TRUNCATE`, data clearing, and high-risk administrative commands |
 
-Configure **Allowed connections** in addition to the execution mode. Connections outside the allowlist are not exposed to MCP. These limits remain active in every mode:
+Configure **Allowed connections** in addition to the execution mode. Connections outside the allowlist are not exposed to MCP. Both settings belong to the signed-in account, so each account only exposes its own connections. These limits remain active in every mode:
 
 - Connection read-only state
 - Production protection

@@ -46,7 +46,7 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
         "ssl": false
     }))
     .expect("minimal connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(&[connection], "").await.expect("save connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -86,7 +86,7 @@ async fn local_backend_picks_up_connections_added_after_startup_without_reload()
         "ssl": false
     }))
     .expect("initial connection config");
-    storage.save_connections(std::slice::from_ref(&initial)).await.expect("save initial connection");
+    storage.save_connections(std::slice::from_ref(&initial), "").await.expect("save initial connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
@@ -108,7 +108,7 @@ async fn local_backend_picks_up_connections_added_after_startup_without_reload()
         "ssl": false
     }))
     .expect("added connection config");
-    storage.save_connections(&[initial, added.clone()]).await.expect("save added connection");
+    storage.save_connections(&[initial, added.clone()], "").await.expect("save added connection");
 
     // list_connections reads storage live, so the new connection is already visible.
     let list_result =
@@ -159,7 +159,7 @@ async fn local_backend_uses_the_installed_duckdb_sidecar() {
         "ssl": false
     }))
     .expect("minimal DuckDB connection config");
-    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save connection");
+    storage.save_connections(std::slice::from_ref(&connection), "").await.expect("save connection");
 
     let backend = LocalBackend::open(&db_path).await.expect("open local backend");
     let error = backend
@@ -177,7 +177,7 @@ async fn legacy_read_only_config_applies_before_settings_are_opened() {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
     let storage = Storage::open(&db_path).await.expect("open storage");
-    assert!(!storage.load_mcp_global_policy().await.expect("load MCP policy").configured);
+    assert!(!storage.load_mcp_user_policy("").await.expect("load MCP policy").configured);
     let connection: ConnectionConfig = serde_json::from_value(json!({
         "id": "legacy-read-only",
         "name": "legacy-read-only",
@@ -190,7 +190,7 @@ async fn legacy_read_only_config_applies_before_settings_are_opened() {
         "ssl": false
     }))
     .expect("minimal connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(&[connection], "").await.expect("save connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -241,7 +241,7 @@ async fn executes_mongo_shell_commands_without_desktop_process() {
         "ssl": false
     }))
     .expect("MongoDB connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(&[connection], "").await.expect("save connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -283,7 +283,7 @@ async fn executes_legacy_mongo_get_indexes_without_desktop_process() {
         "ssl": false
     }))
     .expect("MongoDB Legacy connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(&[connection], "").await.expect("save connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -325,7 +325,7 @@ async fn executes_legacy_mongo_find_explain_without_desktop_process() {
         "ssl": false
     }))
     .expect("MongoDB Legacy connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(&[connection], "").await.expect("save connection");
 
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
