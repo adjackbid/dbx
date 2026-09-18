@@ -313,6 +313,8 @@ pub async fn list_connections(
 
 ### 5.5 設定歸屬現況（2026-09 稽核）
 
+> 完整交接內容（含決策清單、遷移順序、本機建置指令、待決事項）見 **[帳號切分交接文件](./account-isolation.md)**；下表為摘要。
+
 | 類別 | 存放位置 | 歸屬 |
 | --- | --- | --- |
 | UI／編輯器偏好（語言、主題、字型、縮放、介面配置、快速鍵…） | Web：瀏覽器 IndexedDB／localStorage（key 前綴 `u_{userId}:`）；桌面：`app_state` | 個人 |

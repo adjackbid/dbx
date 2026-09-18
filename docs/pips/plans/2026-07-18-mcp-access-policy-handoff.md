@@ -2,6 +2,8 @@
 
 ## 后续变更（2026-09）
 
+帳號切分（每個帳號各自的連線範圍、執行權限、片段、隧道、AI 設定）與管理員限定項目的完整現況，請見 `docs/account-isolation.md`。
+
 MCP 策略已从「全实例单份」改为「按账号一份」：
 
 - 连接范围（`allowedConnectionIds`）与执行权限（`readOnly`、`allowDangerousSql`）改为保存在 `user_settings` 的 `mcp_policy` 键，按 `user_id` 隔离；桌面版沿用空账号 ID。
