@@ -797,6 +797,14 @@ fn migrate_legacy_password_to_admin_user(conn: &Connection) -> Result<(), String
 /// other account starts from the documented default instead of inheriting a
 /// connection allowlist that references somebody else's connections.
 fn migrate_legacy_mcp_policy_to_user_policy(conn: &Connection) -> Result<(), String> {
+    if !legacy_handoff_is_unambiguous(conn)? {
+        // Several accounts already existed, so the instance-wide value cannot be
+        // attributed. Leave it in place (nothing reads it anymore) and let every
+        // account start from the documented default instead of handing one
+        // account a scope or write level somebody else configured.
+        warn!("Leaving the instance-wide MCP policy unattributed because several accounts exist");
+        return Ok(());
+    }
     let Some(legacy) = take_legacy_mcp_policy(conn)? else {
         return Ok(());
     };
@@ -826,6 +834,12 @@ fn migrate_legacy_mcp_policy_to_user_policy(conn: &Connection) -> Result<(), Str
 /// account that owned them before multi-account mode. Non-owning accounts must
 /// never inherit another account's catalog or AI credentials.
 fn migrate_legacy_user_scoped_rows(conn: &Connection) -> Result<(), String> {
+    if !legacy_handoff_is_unambiguous(conn)? {
+        // Several accounts already existed: leaving the rows under the empty
+        // account id keeps them invisible to everyone instead of guessing an owner.
+        warn!("Leaving instance-wide prompt/tunnel/AI rows unattributed because several accounts exist");
+        return Ok(());
+    }
     let owner = legacy_scope_owner(conn)?;
     if owner.is_empty() {
         // Desktop keeps its local rows under the empty account id.
@@ -841,6 +855,12 @@ fn migrate_legacy_user_scoped_rows(conn: &Connection) -> Result<(), String> {
 /// Moves the instance-wide AI selection and global instructions out of
 /// `app_state` into the owning account's settings.
 fn migrate_legacy_ai_state_to_user_settings(conn: &Connection) -> Result<(), String> {
+    if !legacy_handoff_is_unambiguous(conn)? {
+        // Personal values written before accounts existed cannot be attributed to
+        // one of several accounts; the leftover app_state rows stay unread.
+        warn!("Leaving instance-wide AI selection and instructions unattributed because several accounts exist");
+        return Ok(());
+    }
     let owner = legacy_scope_owner(conn)?;
     let migrations = [
         (APP_STATE_AI_CHAT_SELECTION_KEY, AI_CHAT_SELECTION_SETTING_KEY, false),
@@ -902,6 +922,18 @@ fn take_legacy_mcp_policy(conn: &Connection) -> Result<Option<McpUserPolicy>, St
     conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [updated])
         .map_err(|e| e.to_string())?;
     Ok(Some(policy))
+}
+
+/// Whether an instance-wide value can be attributed to a single account.
+///
+/// With at most one account, anything stored instance-wide was necessarily
+/// written by that account (or before accounts existed and now belongs to it).
+/// With several accounts the writer is unknown, so the value must not be handed
+/// to somebody.
+fn legacy_handoff_is_unambiguous(conn: &Connection) -> Result<bool, String> {
+    let account_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    Ok(account_count <= 1)
 }
 
 /// The account that owned the instance-wide data before multi-account mode:
@@ -4735,8 +4767,8 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 mod tests {
     use super::{
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpUserPolicy,
-        McpUserPolicyState, Storage, APP_STATE_AI_CHAT_SELECTION_KEY, LEGACY_MCP_GLOBAL_POLICY_KEY,
-        MCP_USER_POLICY_SETTING_KEY,
+        McpUserPolicyState, Storage, APP_STATE_AI_CHAT_SELECTION_KEY, APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY,
+        DESKTOP_ACCOUNT_ID, LEGACY_MCP_GLOBAL_POLICY_KEY, MCP_USER_POLICY_SETTING_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference,
@@ -6009,6 +6041,77 @@ mod tests {
         // A legacy AI config (and its API key) never leaks into another account.
         assert!(storage.load_ai_config("user-b").await.unwrap().is_none());
         assert!(storage.load_ai_provider_configs("user-b").await.unwrap().is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn instance_wide_values_are_not_handed_over_when_several_accounts_exist() {
+        let path = temp_db_path("legacy-rows-ambiguous");
+        let admin_id;
+        let user_a_id;
+        {
+            let storage = Storage::open(&path).await.unwrap();
+            admin_id = storage
+                .create_user(&crate::user::CreateUserRequest {
+                    username: "admin".to_string(),
+                    password: "admin-password".to_string(),
+                    display_name: None,
+                    is_admin: true,
+                })
+                .await
+                .unwrap()
+                .id;
+            user_a_id = storage
+                .create_user(&crate::user::CreateUserRequest {
+                    username: "user-a".to_string(),
+                    password: "user-a-password".to_string(),
+                    display_name: None,
+                    is_admin: false,
+                })
+                .await
+                .unwrap()
+                .id;
+            storage.save_connections(std::slice::from_ref(&mq_connection("owner", "token")), &admin_id).await.unwrap();
+            // Instance-wide values as an older single-policy build wrote them.
+            storage.save_prompt_template("t1", "Legacy", "content", "").await.unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
+                        rusqlite::params![APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY, r#""only mine""#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [r#"{"mcp_global_policy":{"readOnly":true,"allowedConnectionIds":null}}"#],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        // No account inherits the shared values.
+        assert!(storage.load_prompt_templates(&admin_id).await.unwrap().is_empty());
+        assert!(storage.load_prompt_templates(&user_a_id).await.unwrap().is_empty());
+        assert_eq!(storage.load_ai_global_custom_instructions(&admin_id).await.unwrap(), "");
+        assert_eq!(storage.load_ai_global_custom_instructions(&user_a_id).await.unwrap(), "");
+        assert!(!storage.load_mcp_user_policy(&admin_id).await.unwrap().configured);
+
+        // The unattributed data stays where it was: only the desktop scope can see
+        // it, and no Web session ever resolves to the desktop scope.
+        assert_eq!(storage.load_prompt_templates(DESKTOP_ACCOUNT_ID).await.unwrap().len(), 1);
+        let settings = storage.load_app_settings_json().await.unwrap();
+        assert!(settings.get(LEGACY_MCP_GLOBAL_POLICY_KEY).is_some());
 
         let _ = std::fs::remove_file(path);
     }
