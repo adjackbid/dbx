@@ -1238,9 +1238,9 @@ impl Storage {
             .map_err(|e| e.to_string())?;
 
             conn.execute(
-                "DELETE FROM history WHERE id NOT IN \
-                 (SELECT id FROM history ORDER BY executed_at DESC LIMIT ?1)",
-                [MAX_HISTORY as i64],
+                "DELETE FROM history WHERE user_id = ?1 AND id NOT IN \
+                 (SELECT id FROM history WHERE user_id = ?1 ORDER BY executed_at DESC LIMIT ?2)",
+                params![user_id, MAX_HISTORY as i64],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -4745,7 +4745,9 @@ mod tests {
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
-    use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
+    use crate::history::{
+        HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest, MAX_HISTORY,
+    };
     use crate::models::connection::{
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
@@ -5897,6 +5899,43 @@ mod tests {
         assert!(policy.configured);
         assert!(policy.read_only);
         assert!(!policy.allow_dangerous_sql);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn history_eviction_is_scoped_to_the_owning_account() {
+        let path = temp_db_path("history-eviction-per-account");
+        let storage = Storage::open(&path).await.unwrap();
+
+        for index in 0..(MAX_HISTORY + 5) {
+            let entry = history_entry(
+                &format!("b-{index}"),
+                "conn",
+                "conn",
+                "db",
+                "SELECT 1",
+                &format!("2026-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
+                true,
+            );
+            storage.save_history_entry(&entry, "user-b").await.unwrap();
+        }
+
+        // Account A keeps its own history instead of being evicted by account B's activity.
+        storage
+            .save_history_entry(
+                &history_entry("a-1", "conn", "conn", "db", "SELECT 1", "2026-01-01T00:00:00Z", true),
+                "user-a",
+            )
+            .await
+            .unwrap();
+
+        let mine = storage.load_history_entries_for_user("user-a", MAX_HISTORY, 0, None).await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, "a-1");
+        let theirs = storage.load_history_entries_for_user("user-b", MAX_HISTORY + 10, 0, None).await.unwrap();
+        assert_eq!(theirs.len(), MAX_HISTORY);
+        assert!(theirs.iter().all(|entry| entry.id.starts_with("b-")));
 
         let _ = std::fs::remove_file(path);
     }

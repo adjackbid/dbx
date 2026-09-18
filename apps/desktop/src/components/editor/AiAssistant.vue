@@ -210,6 +210,13 @@ watch(
   },
 );
 
+// The panel can mount before its connection is resolved; retry the resume once
+// the connection name is known.
+watch(
+  () => props.connection?.name,
+  () => restoreLastConversation(),
+);
+
 function toggleTemplateId(id: string) {
   if (activeTemplateIds.value.includes(id)) {
     activeTemplateIds.value = activeTemplateIds.value.filter((tid) => tid !== id);
@@ -2017,6 +2024,27 @@ async function setConversationListOpen(open: boolean) {
   if (open) conversations.value = await loadAiConversations().catch(() => []);
 }
 
+/// Whether the panel already tried to resume the account's last conversation.
+let conversationRestored = false;
+/// Conversations are only resumed once the account's list has loaded.
+let conversationsLoaded = false;
+
+/// Reopen the account's most recent conversation for this connection so closing
+/// the browser and signing in again returns the user to where they left off.
+/// The conversations themselves are stored per account on the server.
+function restoreLastConversation() {
+  if (conversationRestored || !conversationsLoaded) return;
+  if (messages.value.length || conversationId.value) {
+    conversationRestored = true;
+    return;
+  }
+  const connectionName = props.connection?.name;
+  if (!connectionName) return;
+  const previous = conversations.value.find((conv) => conv.connectionName === connectionName);
+  conversationRestored = true;
+  if (previous) selectConversation(previous);
+}
+
 function selectConversation(conv: AiConversation) {
   conversationId.value = conv.id;
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
@@ -2042,6 +2070,7 @@ async function deleteConversation(id: string) {
 
 function startNewChat() {
   clearMessages();
+  conversationRestored = true;
   showConversationList.value = false;
   // A fresh conversation starts from the configured default mode.
   const mode = settings.defaultAiMode;
@@ -2059,6 +2088,8 @@ onMounted(async () => {
   }
 
   conversations.value = await loadAiConversations().catch(() => []);
+  conversationsLoaded = true;
+  restoreLastConversation();
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);

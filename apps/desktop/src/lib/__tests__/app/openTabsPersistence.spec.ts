@@ -1,6 +1,19 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { serializeOpenTabs, restoreOpenTabsPayload } from "@/lib/app/openTabsPersistence";
 import type { QueryTab } from "@/types/database";
+
+const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
+
+describe("open tabs flush on page close (Web)", () => {
+  it("flushes the debounced tab persist when the page is hidden or unloaded", () => {
+    // Otherwise a closed tab loses the last 300ms of tab changes.
+    expect(appSource).toContain('window.addEventListener("pagehide", flushPendingTabPersist)');
+    expect(appSource).toContain('document.addEventListener("visibilitychange", handleVisibilityChange)');
+    expect(appSource).toMatch(/function handleVisibilityChange\(\) \{\s*if \(document\.visibilityState === "hidden"\) flushPendingTabPersist\(\);/);
+    expect(appSource).toContain("void queryStore.flushPendingPersist().catch(() => {})");
+  });
+});
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {
   return {

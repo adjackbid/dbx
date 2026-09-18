@@ -2454,6 +2454,16 @@ watch(updateNotificationsEnabled, (enabled) => {
   }
 });
 
+// Web: a closed tab cannot wait for the 300ms tab-persist debounce, so flush the
+// pending open-tabs write while the page is still allowed to run.
+function flushPendingTabPersist() {
+  void queryStore.flushPendingPersist().catch(() => {});
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") flushPendingTabPersist();
+}
+
 onMounted(async () => {
   console.log("[STARTUP] onMounted begin");
   const mountStart = performance.now();
@@ -2466,6 +2476,10 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  if (!isDesktop) {
+    window.addEventListener("pagehide", flushPendingTabPersist);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
   if (isDesktop) {
     document.addEventListener("contextmenu", handleContextMenu);
   }
@@ -2539,6 +2553,8 @@ onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  window.removeEventListener("pagehide", flushPendingTabPersist);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   document.removeEventListener("contextmenu", handleContextMenu);
   window.clearTimeout(sqlLibraryFlyAnimationTimer);
 });
