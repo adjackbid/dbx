@@ -35,15 +35,18 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
 }
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
-    agent_connect_params_with_role(config, host, port, database, AgentSessionRole::Workload)
+    agent_connect_params_with_role(config, host, port, database, AgentSessionRole::Workload, None)
 }
 
+/// Oracle (and every other agent-backed database) truncates or ignores the
+/// optional `session_label`, so the value is passed through as-is.
 pub fn agent_connect_params_with_role(
     config: &ConnectionConfig,
     host: &str,
     port: u16,
     database: &str,
     session_role: AgentSessionRole,
+    account_label: Option<&str>,
 ) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
@@ -111,6 +114,11 @@ pub fn agent_connect_params_with_role(
         "jdbc_driver_paths": &config.jdbc_driver_paths,
         "sessionRole": session_role.as_str(),
     });
+    // Only present when a signed-in account labels the session; older agents
+    // ignore the extra field, so the protocol stays backward compatible.
+    if let Some(label) = account_label.map(str::trim).filter(|label| !label.is_empty()) {
+        params["session_label"] = serde_json::json!(label);
+    }
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
             (config.effective_connect_timeout_secs() * 1000).max(ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS)
@@ -705,8 +713,36 @@ mod tests {
             9092,
             "test",
             AgentSessionRole::Metadata,
+            None,
         );
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn agent_connect_params_only_carry_a_non_empty_session_label() {
+        let oracle = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+        let unlabeled = agent_connect_params(&oracle, "oracle.example.com", 1521, "ORCLPDB1");
+        assert!(unlabeled.get("session_label").is_none());
+
+        let blank = agent_connect_params_with_role(
+            &oracle,
+            "oracle.example.com",
+            1521,
+            "ORCLPDB1",
+            AgentSessionRole::Workload,
+            Some("   "),
+        );
+        assert!(blank.get("session_label").is_none());
+
+        let labeled = agent_connect_params_with_role(
+            &oracle,
+            "oracle.example.com",
+            1521,
+            "ORCLPDB1",
+            AgentSessionRole::Workload,
+            Some(" Steven Chiang "),
+        );
+        assert_eq!(labeled["session_label"], "Steven Chiang");
     }
 
     #[test]

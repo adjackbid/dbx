@@ -181,7 +181,33 @@ Web 模式下部分偏好在瀏覽器而非伺服器：
 
 ---
 
-## 7. 已知邊界與待決事項
+## 7. 資料庫 session 的帳號標註（Oracle）
+
+Docker/Web 模式下資料庫連線由 **DBX 主機（容器）** 建立，因此 Oracle 端看到的 `OSUSER` 是 `root`、`MACHINE` 是容器 ID——這兩欄由客戶端環境決定，SQL 改不了。可以標註的是 session 屬性：
+
+| `V$SESSION` 欄位 | 設定方式 |
+| --- | --- |
+| `CLIENT_IDENTIFIER` | `DBMS_SESSION.SET_IDENTIFIER` |
+| `MODULE` / `ACTION` | `DBMS_APPLICATION_INFO.SET_MODULE('DBX', <label>)` |
+| `CLIENT_INFO` | `DBMS_APPLICATION_INFO.SET_CLIENT_INFO(<label>)` |
+
+`session_label` 一路從 Web session 傳到 agent：
+
+1. `crates/dbx-web/src/routes/query.rs`：`Extension<UserSession>` → `QueryExecutionOptions.account_label`
+   = `UserSession::account_label()`（顯示名稱，空白時退回帳號名稱）。
+2. `crates/dbx-core/src/connection.rs`：`get_or_create_pool_for_session_with_label()` 轉呼叫
+   `get_or_create_pool_for_session_inner(..., account_label)`。**只有 tab-scoped pool 會帶標註**：
+   連線層級 pool 是所有帳號共用，命名成某一個人會是錯的，因此該情況下標註會被丟棄。
+3. `crates/dbx-core/src/agent_connection.rs`：`agent_connect_params_with_role(..., account_label)`
+   在 JSON 多加一個 `session_label`；舊版 agent 會忽略未知欄位，協定維持向後相容。
+4. `agents/drivers/oracle-go/main.go`：`sessionLabelConnector` 包裝 `driver.Connector`，
+   **每一條實體連線**（`SetMaxOpenConns(4)`）建立時都執行一次上述 PL/SQL，`MODULE` 固定為 `DBX`。
+   - 標註失敗只寫 stderr，不阻擋連線：標註是輔助資訊，不該讓使用者無法查詢。
+   - 依 Oracle 限制截斷（CLIENT_IDENTIFIER / CLIENT_INFO 64 bytes、ACTION 32 bytes），且在 UTF-8 字元邊界截斷。
+
+未涵蓋：桌面版（沒有帳號概念，不標註）、MCP（沒有 tab session）、批次與 SQL 檔執行（走連線層級共用 pool）。若要涵蓋這些，需要改成每個帳號各自的連線池。
+
+## 8. 已知邊界與待決事項
 
 1. **隧道 profile 解析仍跨帳號**：清單個人化，但連線（含尚未儲存的連線）用 profile id 查找 `load_all_tunnel_profiles()`。要嚴格依帳號，未儲存連線將無法用他人 profile id，且測試連線前必須先儲存。
 2. **AI 回合上限／重試次數**目前是實例層級（僅管理員可寫）。若要改成每人一組，改放 `user_settings`。
@@ -194,7 +220,7 @@ Web 模式下部分偏好在瀏覽器而非伺服器：
 
 ---
 
-## 8. 本機建置與測試（此開發機的坑）
+## 9. 本機建置與測試（此開發機的坑）
 
 直接跑 `cargo` 會因為 MSVC 標頭／OpenSSL 而失敗，需先載入 VS2019 BuildTools 環境。作一個包裝批次檔：
 
@@ -228,7 +254,7 @@ cargo %*
 
 ---
 
-## 9. 主要程式碼位置
+## 10. 主要程式碼位置
 
 | 主題 | 檔案 |
 | --- | --- |

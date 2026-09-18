@@ -591,6 +591,11 @@ pub struct QueryExecutionOptions {
     pub catalog: Option<String>,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
+    /// Account name of the signed-in DBX user, forwarded to agent-backed databases
+    /// so the resulting database session can be attributed to that account
+    /// (Oracle `V$SESSION.CLIENT_IDENTIFIER`/`MODULE`/`ACTION`/`CLIENT_INFO`).
+    /// Only ever set server-side from the authenticated session.
+    pub account_label: Option<String>,
     /// Query timeout in seconds. `None` uses the default (30s).
     /// `Some(0)` disables the timeout entirely.
     pub timeout_secs: Option<u64>,
@@ -1843,7 +1848,12 @@ pub async fn execute_sql_statement_with_options_typed(
     // survives across runs.
     let pool_database = query_pool_database(database, options.catalog.as_deref());
     let pool_key = state
-        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .get_or_create_pool_for_session_with_label(
+            connection_id,
+            pool_database,
+            options.client_session_id.as_deref(),
+            options.account_label.as_deref(),
+        )
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
 

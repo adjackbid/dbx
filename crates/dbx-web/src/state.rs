@@ -33,6 +33,19 @@ pub struct UserSession {
     pub last_accessed_at: u64,
 }
 
+impl UserSession {
+    /// Display name (falling back to the account name) used to label the database
+    /// sessions this account opens, so a DBA can attribute them to a person.
+    pub fn account_label(&self) -> String {
+        let display_name = self.display_name.trim();
+        if display_name.is_empty() {
+            self.username.clone()
+        } else {
+            display_name.to_string()
+        }
+    }
+}
+
 const SESSION_TIMEOUT_SECS: u64 = 8 * 3600;
 
 pub struct WebState {

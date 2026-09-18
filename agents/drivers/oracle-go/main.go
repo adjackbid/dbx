@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/sijms/go-ora/v2"
 	go_ora "github.com/sijms/go-ora/v2"
@@ -207,6 +209,10 @@ type connectParams struct {
 	SysDBA           bool   `json:"sysdba"`
 	URLParams        string `json:"url_params"`
 	ConnectionString string `json:"connection_string"`
+	// Signed-in DBX account, forwarded so Oracle sessions opened for that account
+	// can be attributed to it (V$SESSION.CLIENT_IDENTIFIER/MODULE/ACTION/CLIENT_INFO).
+	// Older DBX builds and other databases simply do not send it.
+	SessionLabel string `json:"session_label"`
 }
 
 type completionAssistantRequest struct {
@@ -1055,11 +1061,82 @@ func openDBWithStringConverter(params connectParams, stringConverter converters.
 	if stringConverter != nil {
 		go_ora.SetStringConverter(connector, stringConverter, nil)
 	}
-	db := sql.OpenDB(connector)
+	var openConnector driver.Connector = connector
+	if label := strings.TrimSpace(params.SessionLabel); label != "" {
+		openConnector = &sessionLabelConnector{base: connector, label: label}
+	}
+	db := sql.OpenDB(openConnector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	return db, nil
+}
+
+// Oracle limits for the session attributes DBX writes: CLIENT_IDENTIFIER and
+// CLIENT_INFO are 64 bytes, ACTION is 32 bytes.
+const (
+	oracleClientIdentifierMaxBytes = 64
+	oracleSessionActionMaxBytes    = 32
+)
+
+// sessionLabelConnector tags every physical connection with the DBX account, so
+// the DBA sees who owns each V$SESSION row. Wrapping the connector (rather than
+// running the statement once after connect) matters because the *sql.DB pool
+// opens up to four connections.
+type sessionLabelConnector struct {
+	base  driver.Connector
+	label string
+}
+
+func (c *sessionLabelConnector) Driver() driver.Driver {
+	return c.base.Driver()
+}
+
+func (c *sessionLabelConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Labelling is best effort: a failure here must never block database access.
+	if err := applyOracleSessionLabel(ctx, conn, c.label); err != nil {
+		fmt.Fprintf(os.Stderr, "oracle agent: failed to label session as %q: %v\n", c.label, err)
+	}
+	return conn, nil
+}
+
+const oracleSessionLabelStatement = `BEGIN
+  DBMS_SESSION.SET_IDENTIFIER(:1);
+  DBMS_APPLICATION_INFO.SET_MODULE('DBX', :2);
+  DBMS_APPLICATION_INFO.SET_CLIENT_INFO(:3);
+END;`
+
+func applyOracleSessionLabel(ctx context.Context, conn driver.Conn, label string) error {
+	execer, ok := conn.(driver.ExecerContext)
+	if !ok {
+		return errors.New("driver connection does not support session setup statements")
+	}
+	args := []driver.NamedValue{
+		{Ordinal: 1, Value: truncateUTF8Bytes(label, oracleClientIdentifierMaxBytes)},
+		{Ordinal: 2, Value: truncateUTF8Bytes(label, oracleSessionActionMaxBytes)},
+		{Ordinal: 3, Value: truncateUTF8Bytes(label, oracleClientIdentifierMaxBytes)},
+	}
+	_, err := execer.ExecContext(ctx, oracleSessionLabelStatement, args)
+	return err
+}
+
+// truncateUTF8Bytes cuts text to at most maxBytes bytes without splitting a rune.
+func truncateUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 {
+		if utf8.ValidString(truncated) {
+			return truncated
+		}
+		truncated = truncated[:len(truncated)-1]
+	}
+	return ""
 }
 
 func openAndPingDB(params connectParams, timeout time.Duration) (*sql.DB, error) {

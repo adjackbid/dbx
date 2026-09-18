@@ -172,6 +172,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn account_label_prefers_the_display_name_and_falls_back_to_the_account() {
+        let mut session = session(false);
+        session.username = "T05541".to_string();
+        assert_eq!(session.account_label(), "T05541");
+
+        session.display_name = "  Steven Chiang  ".to_string();
+        assert_eq!(session.account_label(), "Steven Chiang");
+
+        session.display_name = "   ".to_string();
+        assert_eq!(session.account_label(), "T05541");
+    }
+
     async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-web-app-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

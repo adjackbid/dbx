@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	go_ora "github.com/sijms/go-ora/v2"
 	"github.com/sijms/go-ora/v2/configurations"
@@ -2347,5 +2348,164 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 	}
 	if rowCount != 3 {
 		t.Fatalf("expected 3 rows, got %d", rowCount)
+	}
+}
+
+// --- DBX account session labelling (V$SESSION attribution) ---
+
+type sessionLabelTestConn struct {
+	queries []string
+	args    [][]driver.NamedValue
+	err     error
+}
+
+func (c *sessionLabelTestConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("use ExecContext directly")
+}
+
+func (c *sessionLabelTestConn) Close() error { return nil }
+
+func (c *sessionLabelTestConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not supported")
+}
+
+func (c *sessionLabelTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.queries = append(c.queries, query)
+	c.args = append(c.args, args)
+	return nil, c.err
+}
+
+type sessionLabelTestConnector struct {
+	conn driver.Conn
+}
+
+func (c *sessionLabelTestConnector) Connect(context.Context) (driver.Conn, error) { return c.conn, nil }
+
+func (c *sessionLabelTestConnector) Driver() driver.Driver { return nil }
+
+func TestApplyOracleSessionLabelSetsIdentifierModuleAndClientInfo(t *testing.T) {
+	conn := &sessionLabelTestConn{}
+	if err := applyOracleSessionLabel(context.Background(), conn, "Steven Chiang"); err != nil {
+		t.Fatalf("applyOracleSessionLabel returned error: %v", err)
+	}
+	if len(conn.args) != 1 {
+		t.Fatalf("expected one setup statement, got %d", len(conn.args))
+	}
+	if !strings.Contains(conn.queries[0], "DBMS_SESSION.SET_IDENTIFIER") {
+		t.Fatalf("statement must set the client identifier, got %q", conn.queries[0])
+	}
+	if !strings.Contains(conn.queries[0], "DBMS_APPLICATION_INFO.SET_MODULE") ||
+		!strings.Contains(conn.queries[0], "DBMS_APPLICATION_INFO.SET_CLIENT_INFO") {
+		t.Fatalf("statement must set module/action and client info, got %q", conn.queries[0])
+	}
+	got := []any{conn.args[0][0].Value, conn.args[0][1].Value, conn.args[0][2].Value}
+	want := []any{"Steven Chiang", "Steven Chiang", "Steven Chiang"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected bind values: got %v want %v", got, want)
+	}
+}
+
+func TestApplyOracleSessionLabelTruncatesToOracleLimits(t *testing.T) {
+	conn := &sessionLabelTestConn{}
+	// 40 runes of 3 bytes each = 120 bytes, past every Oracle limit.
+	label := strings.Repeat("漢", 40)
+	if err := applyOracleSessionLabel(context.Background(), conn, label); err != nil {
+		t.Fatalf("applyOracleSessionLabel returned error: %v", err)
+	}
+	identifier := conn.args[0][0].Value.(string)
+	action := conn.args[0][1].Value.(string)
+	if len(identifier) > oracleClientIdentifierMaxBytes || len(action) > oracleSessionActionMaxBytes {
+		t.Fatalf("label was not truncated: identifier=%d bytes action=%d bytes", len(identifier), len(action))
+	}
+	if !utf8.ValidString(identifier) || !utf8.ValidString(action) {
+		t.Fatalf("truncation split a multi-byte rune: %q / %q", identifier, action)
+	}
+}
+
+func TestSessionLabelConnectorTagsEveryConnection(t *testing.T) {
+	conn := &sessionLabelTestConn{}
+	connector := &sessionLabelConnector{base: &sessionLabelTestConnector{conn: conn}, label: "T05541"}
+	for attempt := 0; attempt < 2; attempt++ {
+		opened, err := connector.Connect(context.Background())
+		if err != nil {
+			t.Fatalf("Connect returned error: %v", err)
+		}
+		if opened != conn {
+			t.Fatal("Connect must return the wrapped connection")
+		}
+	}
+	if len(conn.args) != 2 {
+		t.Fatalf("every physical connection must be labelled, got %d", len(conn.args))
+	}
+	for index, args := range conn.args {
+		if args[0].Value != "T05541" {
+			t.Fatalf("connection %d got label %v", index, args[0].Value)
+		}
+	}
+}
+
+func TestSessionLabelConnectorKeepsWorkingWhenLabellingFails(t *testing.T) {
+	conn := &sessionLabelTestConn{err: errors.New("ORA-06550")}
+	connector := &sessionLabelConnector{base: &sessionLabelTestConnector{conn: conn}, label: "T05541"}
+	opened, err := connector.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("labelling failures must not block access: %v", err)
+	}
+	if opened != conn {
+		t.Fatal("Connect must still return the connection")
+	}
+}
+
+type sessionLabelPlainConn struct{}
+
+func (c *sessionLabelPlainConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+
+func (c *sessionLabelPlainConn) Close() error { return nil }
+
+func (c *sessionLabelPlainConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not supported")
+}
+
+func TestSessionLabelWithoutExecerDoesNotBlockConnect(t *testing.T) {
+	// A connection type without ExecerContext must be skipped, not fail the connect.
+	conn := &sessionLabelPlainConn{}
+	connector := &sessionLabelConnector{base: &sessionLabelTestConnector{conn: conn}, label: "T05541"}
+	opened, err := connector.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	if opened != conn {
+		t.Fatal("Connect must return the connection unchanged")
+	}
+}
+
+func TestConnectParamsReadOptionalSessionLabel(t *testing.T) {
+	var withLabel connectParams
+	if err := json.Unmarshal([]byte(`{"host":"db","session_label":"Steven Chiang"}`), &withLabel); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if withLabel.SessionLabel != "Steven Chiang" {
+		t.Fatalf("session_label was not read: %q", withLabel.SessionLabel)
+	}
+	var withoutLabel connectParams
+	if err := json.Unmarshal([]byte(`{"host":"db"}`), &withoutLabel); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if withoutLabel.SessionLabel != "" {
+		t.Fatalf("older callers must stay unlabelled, got %q", withoutLabel.SessionLabel)
+	}
+}
+
+func TestTruncateUTF8BytesKeepsRuneBoundaries(t *testing.T) {
+	if got := truncateUTF8Bytes("abc", 8); got != "abc" {
+		t.Fatalf("short values must pass through, got %q", got)
+	}
+	if got := truncateUTF8Bytes("abcdef", 4); got != "abcd" {
+		t.Fatalf("ascii truncation mismatch: %q", got)
+	}
+	if got := truncateUTF8Bytes("漢漢漢", 4); got != "漢" {
+		t.Fatalf("multi-byte truncation must not split runes, got %q", got)
 	}
 }

@@ -1658,6 +1658,7 @@ impl AppState {
             None,
             AgentSessionRole::Workload,
             Some(attempt),
+            None,
         )
         .await
     }
@@ -1669,6 +1670,33 @@ impl AppState {
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
         self.get_or_create_pool_for_session_with_catalog(connection_id, database, None, client_session_id).await
+    }
+
+    /// Same as [`Self::get_or_create_pool_for_session`], but carries the signed-in
+    /// DBX account so an agent-backed database session (Oracle, …) can be labelled
+    /// with it at connect time. Only pass a server-derived account name.
+    ///
+    /// The label is dropped when the pool is not tab-scoped: a connection-level
+    /// pool is shared by every account, so naming it after one of them would be
+    /// wrong.
+    pub async fn get_or_create_pool_for_session_with_label(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: Option<&str>,
+        account_label: Option<&str>,
+    ) -> Result<String, String> {
+        let account_label = if normalize_client_session_id(client_session_id).is_some() { account_label } else { None };
+        self.get_or_create_pool_for_session_inner(
+            connection_id,
+            database,
+            None,
+            client_session_id,
+            AgentSessionRole::Workload,
+            None,
+            account_label,
+        )
+        .await
     }
 
     pub async fn get_or_create_pool_for_session_with_catalog(
@@ -1684,6 +1712,7 @@ impl AppState {
             catalog,
             client_session_id,
             AgentSessionRole::Workload,
+            None,
             None,
         )
         .await
@@ -1702,6 +1731,7 @@ impl AppState {
             client_session_id,
             AgentSessionRole::Metadata,
             None,
+            None,
         )
         .await
     }
@@ -1714,6 +1744,7 @@ impl AppState {
         client_session_id: Option<&str>,
         session_role: AgentSessionRole,
         connection_attempt: Option<u64>,
+        account_label: Option<&str>,
     ) -> Result<String, String> {
         let config = {
             let configs = self.configs.read().await;
@@ -2058,6 +2089,7 @@ impl AppState {
                     port,
                     db_config.effective_database().unwrap_or(""),
                     session_role,
+                    account_label,
                 );
                 if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
@@ -2093,6 +2125,7 @@ impl AppState {
                                         port,
                                         db_config.effective_database().unwrap_or(""),
                                         session_role,
+                                        account_label,
                                     ),
                                     agent_connect_timeout(&db_config),
                                 )
@@ -2125,6 +2158,7 @@ impl AppState {
                                                 port,
                                                 db_config.effective_database().unwrap_or(""),
                                                 session_role,
+                                                account_label,
                                             ),
                                             Some(agent_connect_timeout(&db_config)),
                                         )
@@ -2148,6 +2182,7 @@ impl AppState {
                                         port,
                                         alternate_config.effective_database().unwrap_or(""),
                                         session_role,
+                                        account_label,
                                     );
                                     match self
                                         .spawn_routed_shared_agent_client(
@@ -2220,6 +2255,7 @@ impl AppState {
                                             port,
                                             alternate_config.effective_database().unwrap_or(""),
                                             session_role,
+                                            account_label,
                                         ),
                                         Some(agent_connect_timeout(&alternate_config)),
                                     )
@@ -3270,6 +3306,7 @@ impl AppState {
             catalog,
             client_session_id,
             session_role,
+            None,
             None,
         )
         .await

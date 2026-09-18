@@ -328,6 +328,7 @@ pub struct BuildDatabaseSqlExportRequest {
 
 pub async fn execute_query(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     headers: HeaderMap,
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
@@ -358,6 +359,8 @@ pub async fn execute_query(
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
+            // Labels agent-backed database sessions with the signed-in account.
+            account_label: Some(session.account_label()),
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
@@ -374,6 +377,7 @@ pub async fn execute_query(
 
 pub async fn execute_multi(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     headers: HeaderMap,
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<Vec<dbx_core::query::ExecuteMultiResult>>, AppError> {
@@ -404,6 +408,7 @@ pub async fn execute_multi(
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
+            account_label: Some(session.account_label()),
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
@@ -433,6 +438,8 @@ pub async fn execute_batch(
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, statement, false).await?;
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
+    // Batch execution runs on the connection-level pool, which every account can
+    // share, so it deliberately carries no account label.
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,

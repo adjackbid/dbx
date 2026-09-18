@@ -323,6 +323,7 @@ pub async fn list_connections(
 | 程式碼片段（`prompt_templates`）、AI 全域指令、隧道設定檔（`tunnel_profiles`） | 資料表 `user_id` 欄位（`UNIQUE(name)` 已改為應用層同帳號檢查） | 個人 |
 | AI 模式／選用模型（`ai_chat_selection_v1`）、舊版 AI 設定（`ai_config`／`ai_provider_configs`） | `user_settings`／資料表 `user_id` | 個人 |
 | MCP 策略（連線範圍、執行權限） | `user_settings.mcp_policy` | 個人 |
+| 資料庫 session 標註（Oracle `V$SESSION` 的 CLIENT_IDENTIFIER／MODULE／ACTION／CLIENT_INFO） | 由 Web session 傳給 agent 的 `session_label` | 個人（僅 tab-scoped 連線池） |
 | AI 回合上限、重試次數 | `app_settings` | 實例層級，僅管理員可寫 |
 | 雲端同步（WebDAV 目標與密碼、同步密文口令、片段同步 token） | `app_settings`／`app_state` | 實例層級，僅管理員可存取（Web 無此 UI） |
 | 使用者管理、LDAP、稽核、備份還原、登入密碼 | — | 管理員（後端 `is_admin` 檢查） |
