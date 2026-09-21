@@ -762,6 +762,7 @@ async fn close_table_export_cursor_if_open(
                 &session_id,
                 Some(&client_session_id),
                 None,
+                None,
             )
             .await;
         }

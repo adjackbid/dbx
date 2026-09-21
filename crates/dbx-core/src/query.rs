@@ -2000,9 +2000,14 @@ pub async fn close_query_session(
     session_id: &str,
     client_session_id: Option<&str>,
     catalog: Option<&str>,
+    account_label: Option<&str>,
 ) -> Result<bool, String> {
     let pool_database = query_pool_database(database, catalog);
-    let pool_key = state.get_or_create_pool_for_session(connection_id, pool_database, client_session_id).await?;
+    // Uses the labelled creator so that closing a session never materialises an
+    // unlabelled pool for a tab that a later query would then reuse.
+    let pool_key = state
+        .get_or_create_pool_for_session_with_label(connection_id, pool_database, client_session_id, account_label)
+        .await?;
 
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Connection not found")?;
@@ -2151,7 +2156,12 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     }
 
     let pool_key = state
-        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .get_or_create_pool_for_session_with_label(
+            connection_id,
+            pool_database,
+            options.client_session_id.as_deref(),
+            options.account_label.as_deref(),
+        )
         .await
         .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
     if let Some(execution_id) = options.execution_id.as_deref() {

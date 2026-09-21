@@ -1686,7 +1686,16 @@ impl AppState {
         client_session_id: Option<&str>,
         account_label: Option<&str>,
     ) -> Result<String, String> {
-        let account_label = if normalize_client_session_id(client_session_id).is_some() { account_label } else { None };
+        let account_label = if normalize_client_session_id(client_session_id).is_some() {
+            account_label
+        } else {
+            if account_label.is_some_and(|label| !label.trim().is_empty()) {
+                log::debug!(
+                    "Dropped the account session label for '{connection_id}': the pool is not tab-scoped, so it is shared by every account"
+                );
+            }
+            None
+        };
         self.get_or_create_pool_for_session_inner(
             connection_id,
             database,

@@ -464,8 +464,10 @@ pub async fn cancel_query(
 
 pub async fn close_query_session(
     State(state): State<Arc<WebState>>,
+    axum::extract::Extension(session): axum::extract::Extension<crate::state::UserSession>,
     Json(req): Json<CloseSessionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let account_label = session.account_label();
     let closed = dbx_core::query::close_query_session(
         &state.app,
         &req.connection_id,
@@ -473,6 +475,7 @@ pub async fn close_query_session(
         &req.session_id,
         req.client_session_id.as_deref(),
         req.catalog.as_deref(),
+        Some(account_label.as_str()),
     )
     .await
     .map_err(AppError::from)?;

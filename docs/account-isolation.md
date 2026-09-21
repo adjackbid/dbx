@@ -205,7 +205,14 @@ Docker/Web 模式下資料庫連線由 **DBX 主機（容器）** 建立，因�
    - 標註失敗只寫 stderr，不阻擋連線：標註是輔助資訊，不該讓使用者無法查詢。
    - 依 Oracle 限制截斷（CLIENT_IDENTIFIER / CLIENT_INFO 64 bytes、ACTION 32 bytes），且在 UTF-8 字元邊界截斷。
 
-未涵蓋：桌面版（沒有帳號概念，不標註）、MCP（沒有 tab session）、批次與 SQL 檔執行（走連線層級共用 pool）。若要涵蓋這些，需要改成每個帳號各自的連線池。
+未涵蓋：桌面版（沒有帳號概念，不標註）、MCP（沒有 tab session）、批次／`execute_statements` 與 SQL 檔執行（走連線層級共用 pool）、以及匯出／匯入（用各自的 `...:export` client session）。
+
+**踩過的坑（2026-09-21 修正）**：標註只在 **pool 建立的那一刻** 決定，所以同一把 pool key 若先被「不帶標註」的路徑建立，之後再怎麼帶標註都不會生效。編輯器的一般執行走 `/api/query/execute-multi`，而 `execute_multi_core_with_options_for_client_and_progress_typed` 當時是用沒有標註的 `get_or_create_pool_for_session()`，因此 Oracle session 一直顯示 `MODULE=agent`、`CLIENT_IDENTIFIER` 是空的。修法：
+- 多語句路徑改用 `get_or_create_pool_for_session_with_label()`。
+- `close_query_session()` 也帶標註，避免「先關 session 再查詢」時把 pool 建成無標註版本。
+- `get_or_create_pool_for_session_with_label()` 在因非 tab-scoped 而丟棄標註時寫 `log::debug!`，不再無聲失敗。
+
+要驗證標註真的生效，請**開新分頁**執行查詢（舊分頁可能已存在無標註的 pool），再查 `v$session`。
 
 ## 8. 已知邊界與待決事項
 
