@@ -3,6 +3,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # `.git` is excluded from the build context, so pass the revision in.
+        DBX_BUILD_COMMIT: ${DBX_BUILD_COMMIT:-unknown}
     ports:
       - "127.0.0.1:4225:4225"
     environment:

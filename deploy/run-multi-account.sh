@@ -9,9 +9,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.multi-account.yml"
 
+# Stamp the revision into the image so the sign-in screen can show which build
+# is deployed (`.git` is excluded from the Docker build context).
+DBX_BUILD_COMMIT="$(git -C "$SCRIPT_DIR/.." rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+export DBX_BUILD_COMMIT
+
 echo "==> Building & starting dbx-multi-account on port 4230..."
 echo "    Compose file: $COMPOSE_FILE"
 echo "    Data volume:  dbx-multi-account-data (isolated from production)"
+echo "    Build commit: $DBX_BUILD_COMMIT"
+echo ""
+echo "    Note: Oracle session labelling lives in agents/drivers/oracle-go and is"
+echo "          NOT part of the image. Rebuild & copy that agent separately"
+echo "          (see docs/account-isolation.md section 10.4)."
 echo ""
 
 docker compose -f "$COMPOSE_FILE" up --build -d

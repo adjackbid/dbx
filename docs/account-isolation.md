@@ -278,7 +278,8 @@ cargo %*
 
 Docker 建置 context 不含 `.git`（見 `deploy/Dockerfile.dockerignore`），所以 `deploy/Dockerfile` 的 backend stage 有
 `ARG DBX_BUILD_COMMIT`，並由 `.github/workflows/release.yml`、`docker-dev.yml` 以
-`build-args: DBX_BUILD_COMMIT=${{ github.sha }}` 帶入。手動建置時：
+`build-args: DBX_BUILD_COMMIT=${{ github.sha }}` 帶入；本機的 `deploy/docker-compose*.yml` 則由
+`deploy/run-multi-account.bat` / `.sh` 先算好 `git rev-parse --short=12 HEAD` 再傳入。手動建置時：
 
 ```bash
 docker build -f deploy/Dockerfile --build-arg DBX_BUILD_COMMIT=$(git rev-parse --short=12 HEAD) .
@@ -296,20 +297,47 @@ API 曝露位置（兩者都是**免登入**，登入頁才讀得到）：
 
 ### 10.3 確認部署版本的實務做法
 
+以下以 multi-account 實例（容器 `dbx-multi-account`、埠 4230、volume `dbx-multi-account-data`）為例：
+
 ```bash
-# 1. 前端有沒有含某次修正（以 adminOnlySetting 這個新增的閘門為例）
+# 1. 映像建置時間與前端是否含某次修正（以 adminOnlySetting 這個閘門為例）
 docker inspect -f '{{.Created}}' dbx-multi-account
 docker exec dbx-multi-account grep -rl "adminOnlySetting" /app/static | head
 
-# 2. 後端 build identity（最準，因為 build.rs 是編譯期寫入）
-curl -s http://localhost:4224/api/auth/check | jq '{version, commit, buildTimeMs}'
+# 2. 後端 build identity（最準，build.rs 是編譯期寫入；注意容器內沒有 curl，要在 host 執行）
+curl -s http://localhost:4230/api/auth/check
+# Windows PowerShell: Invoke-RestMethod http://localhost:4230/api/auth/check
 
-# 3. 登入頁直接看版本字串
+# 3. 登入頁最下方直接看 `v<版號> · <commit> · <建置時間>`
 ```
 
-**注意**：Docker image 只建置前端與 `dbx-web`（`deploy/Dockerfile.dockerignore` 排除 `agents/`），
-所以 **Oracle session 標註（§7）需要另外重建並安裝 `agents/drivers/oracle-go` 的執行檔**，
-只重建 image 不會生效。重建 image 也無法取代 `Cargo.lock` / 版號的更新。
+`deploy/run-multi-account.bat` / `.sh` 會先執行 `git rev-parse --short=12 HEAD` 並透過
+compose 的 `build.args` 傳給 `deploy/Dockerfile`，所以用這兩個腳本重建時 commit 一定是對的；
+手動 `docker build` 忘了帶 `--build-arg DBX_BUILD_COMMIT=...` 時，登入頁只會顯示版號（commit 為 `unknown`）。
+
+### 10.4 更新既有環境（重建容器但不動資料）
+
+```bat
+deploy\run-multi-account.bat        REM = docker compose -f deploy/docker-compose.multi-account.yml up --build -d
+```
+
+- `--build` 會用**目前 working tree**的原始碼重建映像；compose 會 recreate 同一個容器
+  （`container_name: dbx-multi-account`），不會多開一個。
+- named volume `dbx-multi-account-data` 會保留，帳號、連線設定、AI 對話、SQL 歷史都在裡面；
+  啟動時 `Storage::init_schema` 會對既有資料庫套用新的遷移。
+- **`agents/` 不在 build context 內**，所以 volume 裡的 agent 執行檔不會跟著更新（見下）。
+
+Oracle session 標註要生效，必須**另外**把 patch 過的 agent 放進容器（檔案存在 volume，重開容器仍留著）：
+
+```bash
+cd agents/drivers/oracle-go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent .
+docker cp agent dbx-multi-account:/app/data/agents/drivers/oracle/agent
+docker restart dbx-multi-account      # 或只重新連線 Oracle
+```
+
+驗證：`select client_identifier, module, action, client_info from v$session where module = 'DBX';`
+若 `client_identifier` 是空的，代表容器裡跑的還是舊 agent（`docker exec dbx-multi-account ls -l /app/data/agents/drivers/oracle/` 看日期）。
 
 ---
 

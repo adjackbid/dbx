@@ -22,6 +22,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # `.git` is excluded from the build context, so pass the revision in
+        # (run-multi-account.bat / .sh set it; otherwise the sign-in screen
+        # shows the version without a commit).
+        DBX_BUILD_COMMIT: ${DBX_BUILD_COMMIT:-unknown}
     container_name: dbx-multi-account
     ports:
       - "0.0.0.0:4230:4230"
