@@ -66,6 +66,13 @@ COPY plugins/dialects/ plugins/dialects/
 # source change and recompiles instead of reusing the dummy binary.
 RUN find crates/ -name '*.rs' -exec touch {} +
 
+# Build identity compiled into the binary by crates/dbx-web/build.rs. `.git` is
+# excluded from the build context, so the revision has to be passed in:
+#   docker build --build-arg DBX_BUILD_COMMIT=$(git rev-parse --short=12 HEAD) ...
+# Declared late on purpose so a new revision only invalidates the rebuild below.
+ARG DBX_BUILD_COMMIT=""
+ENV DBX_BUILD_COMMIT=$DBX_BUILD_COMMIT
+
 RUN case "$TARGETARCH" in \
       amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
       arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \

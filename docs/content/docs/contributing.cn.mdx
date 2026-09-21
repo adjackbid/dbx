@@ -398,6 +398,10 @@ git diff
 
 如果修改跨越多个区域，需要合并执行对应检查。修复 Bug 时，还应再次执行原始复现步骤，证明问题已消失，并检查相邻正常场景没有回归。
 
+<Callout type="warn">
+  只要改动会影响用户可见行为，就必须同时跳四个清单档的应用版本号：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`crates/dbx-web/Cargo.toml`，以及 `Cargo.lock` 中对应的两个 `version`（`dbx` 与 `dbx-web`）。Docker 镜像会通过 `DBX_BUILD_COMMIT` 写入 git 版本号，登录画面会显示版本、revision 与构建时间，运维人员据此确认部署实际运行的版本。详见仓库内 `docs/account-isolation.md` 第 10 节。
+</Callout>
+
 ## 8. 提交并推送
 
 提交信息使用简短的 conventional commit 格式：

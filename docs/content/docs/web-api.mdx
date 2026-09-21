@@ -37,7 +37,10 @@ Example response:
 {
   "authenticated": false,
   "required": true,
-  "setup_required": false
+  "setup_required": false,
+  "version": "0.5.82",
+  "commit": "6b12c3005abc",
+  "buildTimeMs": "1767225600000"
 }
 ```
 
@@ -46,6 +49,9 @@ Example response:
 | `required` | Password protection is enabled |
 | `setup_required` | First-run password setup is still needed |
 | `authenticated` | Current request already has a valid session |
+| `version` | Version of the running server (shown on the sign-in screen) |
+| `commit` | Git revision of the build, up to 12 characters (`unknown` when unavailable) |
+| `buildTimeMs` | Build time as Unix milliseconds |
 
 ### First-Run Setup
 
@@ -334,6 +340,26 @@ See the repository examples:
 - [examples/web-api/automation.sh](https://github.com/t8y2/dbx/tree/main/examples/web-api/automation.sh)
 - [examples/docker/docker-compose.yml](https://github.com/t8y2/dbx/tree/main/examples/docker/docker-compose.yml)
 - [examples/cli/basic-workflow.sh](https://github.com/t8y2/dbx/tree/main/examples/cli/basic-workflow.sh)
+
+## Server Version
+
+```http
+GET /api/version
+```
+
+Example response:
+
+```json
+{
+  "version": "0.5.82",
+  "commit": "6b12c3005abc",
+  "buildTimeMs": "1767225600000"
+}
+```
+
+This route requires a session; `GET /api/auth/check` returns the same three fields without one, which is
+what the sign-in screen uses to display the running build. `commit` is the git revision embedded at
+build time (see `CONTRIBUTING.md` → Versioning).
 
 ## Route Groups
 

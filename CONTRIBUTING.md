@@ -104,6 +104,23 @@ pnpm test
 
 For frontend or package changes, run the relevant package tests under `packages/` or `packages/app-tests/`.
 
+### Versioning
+
+DBX reports its version on the sign-in screen and from `GET /api/version`, and every build embeds the
+git revision plus the build time, so a running deployment can be told apart from another build of the
+same release.
+
+- Bump the patch version in **all four manifests** whenever a change affects shipped, user-visible
+  behavior (`0.5.82` → `0.5.83`): `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
+  `crates/dbx-web/Cargo.toml`.
+- Update the two matching `version` entries in `Cargo.lock` (`dbx` and `dbx-web`); Docker builds do not
+  refresh the lock file.
+- `crates/dbx-web/build.rs` writes `DBX_BUILD_COMMIT` and `DBX_BUILD_TIME` into the binary. Docker
+  builds pass the revision explicitly — `--build-arg DBX_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)`
+  — because `.git` is excluded from the build context.
+
+Details: `docs/account-isolation.md` §10.
+
 ### Documentation
 
 User-facing docs live in two places:

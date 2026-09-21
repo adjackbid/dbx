@@ -32,6 +32,13 @@ pub struct AuthCheckResponse {
     pub required: bool,
     pub setup_required: bool,
     pub user: Option<AuthUserInfo>,
+    /// Running build identity, so the sign-in screen can show which version is
+    /// being served without requiring a session.
+    pub version: String,
+    pub commit: String,
+    /// Keeps the wire name identical to `/api/version`'s `buildTimeMs`.
+    #[serde(rename = "buildTimeMs")]
+    pub build_time_ms: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -307,12 +314,24 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
     if state.password_disabled {
-        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false, user: None });
+        return Json(AuthCheckResponse {
+            authenticated: true,
+            required: false,
+            setup_required: false,
+            user: None,
+            ..build_identity()
+        });
     }
 
     let user_count = state.app.storage.count_users().await.unwrap_or(0);
     if user_count == 0 {
-        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true, user: None });
+        return Json(AuthCheckResponse {
+            authenticated: false,
+            required: false,
+            setup_required: true,
+            user: None,
+            ..build_identity()
+        });
     }
 
     let authenticated = match extract_session_token(&req) {
@@ -330,6 +349,7 @@ pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::
                         is_admin: session.is_admin,
                         auth_source: session.auth_source.to_string(),
                     }),
+                    ..build_identity()
                 });
             }
             false
@@ -337,7 +357,22 @@ pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::
         None => false,
     };
 
-    Json(AuthCheckResponse { authenticated, required: true, setup_required: false, user: None })
+    Json(AuthCheckResponse { authenticated, required: true, setup_required: false, user: None, ..build_identity() })
+}
+
+/// Build identity used by both `/api/version` and `/api/auth/check`.
+fn build_identity() -> AuthCheckResponse {
+    let info = crate::routes::update::build_info();
+    let field = |name: &str| info.get(name).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    AuthCheckResponse {
+        authenticated: false,
+        required: false,
+        setup_required: false,
+        user: None,
+        version: field("version"),
+        commit: field("commit"),
+        build_time_ms: field("buildTimeMs"),
+    }
 }
 
 pub async fn change_password(
@@ -570,7 +605,7 @@ pub struct ResetPasswordRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_path_suffix, middleware_api_path_suffix};
+    use super::{api_path_suffix, build_identity, middleware_api_path_suffix};
 
     #[test]
     fn api_path_suffix_handles_root_api_paths() {
@@ -593,5 +628,23 @@ mod tests {
         assert_eq!(middleware_api_path_suffix("/api/connection/list", "/"), Some("connection/list"));
         assert_eq!(middleware_api_path_suffix("/dbx/api/connection/list", "/dbx"), Some("connection/list"));
         assert_eq!(middleware_api_path_suffix("/dbx/login", "/dbx"), None);
+    }
+
+    #[test]
+    fn auth_check_serializes_the_build_identity_the_login_page_reads() {
+        let value = serde_json::to_value(build_identity()).expect("checks are serializable");
+        for key in ["version", "commit", "buildTimeMs"] {
+            let field = value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default();
+            assert!(!field.is_empty(), "`{key}` must be a non-empty string for the sign-in screen");
+        }
+    }
+
+    #[test]
+    fn auth_check_reports_the_same_identity_as_the_version_route() {
+        let check = serde_json::to_value(build_identity()).expect("checks are serializable");
+        let version = crate::routes::update::build_info();
+        for key in ["version", "commit", "buildTimeMs"] {
+            assert_eq!(check.get(key), version.get(key), "`{key}` differs between the two routes");
+        }
     }
 }

@@ -398,6 +398,10 @@ Run checks that match the changed area:
 
 Run the combined checks when a change crosses multiple areas. For a bug fix, repeat the original reproduction steps to prove the bug is gone and test adjacent normal behavior for regressions.
 
+<Callout type="warn">
+  User-visible changes must bump the application version in all four manifests — `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `crates/dbx-web/Cargo.toml` — plus the two matching `version` entries in `Cargo.lock` (`dbx` and `dbx-web`). Docker images embed the git revision through `DBX_BUILD_COMMIT`, and the sign-in screen shows version, revision, and build time, so an operator can confirm which build a deployment is serving. Details: repository `docs/account-isolation.md` §10.
+</Callout>
+
 ## 8. Commit and Push
 
 Use a short conventional commit message:

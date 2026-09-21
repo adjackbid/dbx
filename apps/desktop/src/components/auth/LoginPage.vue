@@ -6,6 +6,7 @@ import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Lock, Loader2, ShieldCheck, User } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import { apiUrl } from "@/lib/common/webPath";
+import { formatBuildLabel } from "@/lib/app/buildLabel";
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const props = withDefaults(
@@ -31,11 +32,23 @@ const password = ref("");
 const confirmPassword = ref("");
 const error = ref("");
 const loading = ref(false);
+const buildLabel = ref("");
 
-onMounted(() => {
+onMounted(async () => {
   // Pre-fill default admin username in setup mode
   if (props.setupMode) {
     username.value = "admin";
+  }
+  // Show which build this server serves, so an upgrade can be confirmed from the
+  // sign-in screen without logging in.
+  try {
+    const res = await fetch(apiUrl("/api/auth/check"));
+    if (res.ok) {
+      const data = await res.json();
+      buildLabel.value = formatBuildLabel(data);
+    }
+  } catch {
+    /* server unreachable — keep the label empty */
   }
 });
 
@@ -129,6 +142,9 @@ async function submit() {
       </form>
 
       <p class="text-center text-xs text-muted-foreground/50">Powered by DBX</p>
+      <p v-if="buildLabel" class="text-center font-mono text-[11px] text-muted-foreground/50" data-testid="login-build-label">
+        {{ buildLabel }}
+      </p>
     </div>
   </div>
 </template>

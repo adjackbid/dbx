@@ -254,8 +254,66 @@ cargo %*
 
 ---
 
-## 10. 主要程式碼位置
+## 10. 版本與建置識別（如何確認容器跑的是哪一版）
 
+改版號與建置識別是**部署可驗證性**的一部分：多帳號環境下常需要確認「跑起來的容器到底有沒有含這次修正」。
+
+### 10.1 版號規則
+
+- 版號同時存在 4 個檔案，改版時必須一起跳號（否則前端顯示、Docker tag、`/api/version` 會不一致）：
+  `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`crates/dbx-web/Cargo.toml`。
+- **`Cargo.lock` 也要跟著改**：`[[package]] name = "dbx"` 與 `name = "dbx-web"` 兩處的 `version`。
+  （Docker 建置不會去更新 lock file，沒改會建置失敗。）
+- 判定「要不要跳版」的標準：**只要動到使用者可見行為或需要重建容器，就跳 patch 版號**（`0.5.82` → `0.5.83`）。只有內部重構、測試、註解可以不跳。
+- Web 版對外顯示的版號是 `crates/dbx-web/Cargo.toml` 的 `CARGO_PKG_VERSION`（`/api/version`、`/api/auth/check` 都回傳它）。
+
+### 10.2 建置識別（commit + 建置時間）
+
+`crates/dbx-web/build.rs` 會在編譯時把兩個值寫進執行檔：
+
+| 環境變數 | 說明 | 未提供時 |
+| --- | --- | --- |
+| `DBX_BUILD_COMMIT` | git revision（取前 12 字元） | 執行 `git rev-parse --short=12 HEAD`，失敗則 `unknown` |
+| `DBX_BUILD_TIME` | 建置當下的 Unix 毫秒 | build.rs 執行時間 |
+
+Docker 建置 context 不含 `.git`（見 `deploy/Dockerfile.dockerignore`），所以 `deploy/Dockerfile` 的 backend stage 有
+`ARG DBX_BUILD_COMMIT`，並由 `.github/workflows/release.yml`、`docker-dev.yml` 以
+`build-args: DBX_BUILD_COMMIT=${{ github.sha }}` 帶入。手動建置時：
+
+```bash
+docker build -f deploy/Dockerfile --build-arg DBX_BUILD_COMMIT=$(git rev-parse --short=12 HEAD) .
+```
+
+API 曝露位置（兩者都是**免登入**，登入頁才讀得到）：
+
+- `GET /api/version` → `{ "version": "0.5.82", "commit": "6b12c3005abc", "buildTimeMs": "1767225600000" }`
+  （`/api/version` 位於需登入的 router 內，Web 前端另有 `auth/*` 例外清單。）
+- `GET /api/auth/check` → 除 `required` / `authenticated` / `setup_required` 外，多回傳 `version` / `commit` / `buildTimeMs`。
+
+前端 `apps/desktop/src/components/auth/LoginPage.vue` 會呼叫 `/api/auth/check`，把結果交給
+`apps/desktop/src/lib/app/buildLabel.ts` 的 `formatBuildLabel()`，在登入畫面下方顯示
+`v0.5.82 · 6b12c3005abc · 2026-01-01 02:30`（UTC）。桌面版（Tauri）一樣走這個頁面。
+
+### 10.3 確認部署版本的實務做法
+
+```bash
+# 1. 前端有沒有含某次修正（以 adminOnlySetting 這個新增的閘門為例）
+docker inspect -f '{{.Created}}' dbx-multi-account
+docker exec dbx-multi-account grep -rl "adminOnlySetting" /app/static | head
+
+# 2. 後端 build identity（最準，因為 build.rs 是編譯期寫入）
+curl -s http://localhost:4224/api/auth/check | jq '{version, commit, buildTimeMs}'
+
+# 3. 登入頁直接看版本字串
+```
+
+**注意**：Docker image 只建置前端與 `dbx-web`（`deploy/Dockerfile.dockerignore` 排除 `agents/`），
+所以 **Oracle session 標註（§7）需要另外重建並安裝 `agents/drivers/oracle-go` 的執行檔**，
+只重建 image 不會生效。重建 image 也無法取代 `Cargo.lock` / 版號的更新。
+
+---
+
+## 11. 主要程式碼位置
 | 主題 | 檔案 |
 | --- | --- |
 | 帳號欄位、遷移、個人化 storage | `crates/dbx-core/src/storage.rs`（`init_schema`、`legacy_scope_owner`、`*_for_user`、`load_mcp_user_policy`、`connection_user_id`） |

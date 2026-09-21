@@ -37,7 +37,10 @@ GET /api/auth/check
 {
   "authenticated": false,
   "required": true,
-  "setup_required": false
+  "setup_required": false,
+  "version": "0.5.82",
+  "commit": "6b12c3005abc",
+  "buildTimeMs": "1767225600000"
 }
 ```
 
@@ -46,6 +49,9 @@ GET /api/auth/check
 | `required` | 已启用密码保护 |
 | `setup_required` | 仍需首次设置密码 |
 | `authenticated` | 当前请求已持有有效会话 |
+| `version` | 正在运行的服务端版本（显示在登录页） |
+| `commit` | 构建的 Git 版本号，最多 12 个字符（无法取得时为 `unknown`） |
+| `buildTimeMs` | 构建时间的 Unix 毫秒值 |
 
 ### 首次设置密码
 
@@ -334,6 +340,25 @@ CLI 同样支持 `DBX_WEB_URL` 和 `DBX_WEB_PASSWORD`。两者都复用 Web 后�
 - [examples/web-api/automation.sh](https://github.com/t8y2/dbx/tree/main/examples/web-api/automation.sh)
 - [examples/docker/docker-compose.yml](https://github.com/t8y2/dbx/tree/main/examples/docker/docker-compose.yml)
 - [examples/cli/basic-workflow.sh](https://github.com/t8y2/dbx/tree/main/examples/cli/basic-workflow.sh)
+
+## 服务端版本
+
+```http
+GET /api/version
+```
+
+示例响应：
+
+```json
+{
+  "version": "0.5.82",
+  "commit": "6b12c3005abc",
+  "buildTimeMs": "1767225600000"
+}
+```
+
+该路由需要会话；`GET /api/auth/check` 无需会话即可返回同样三个字段，登录页正是用它显示当前构建。
+`commit` 是构建时写入的 Git 版本号（参见 `CONTRIBUTING.md` 的 Versioning 一节）。
 
 ## 其他路由分组
 
