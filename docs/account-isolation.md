@@ -327,17 +327,44 @@ deploy\run-multi-account.bat        REM = docker compose -f deploy/docker-compos
   啟動時 `Storage::init_schema` 會對既有資料庫套用新的遷移。
 - **`agents/` 不在 build context 內**，所以 volume 裡的 agent 執行檔不會跟著更新（見下）。
 
-Oracle session 標註要生效，必須**另外**把 patch 過的 agent 放進容器（檔案存在 volume，重開容器仍留著）：
+Oracle session 標註要生效，必須**另外**把 patch 過的 agent 放進容器（檔案存在 volume，重開容器仍留著）。
+容器是 `linux/amd64`，所以需要**交叉編譯**；此開發機沒有安裝 Go，用可攜版工具鏈即可：
+
+```powershell
+# 1. 可攜版 Go（一次性，約 75MB）
+curl.exe -L -o "$env:TEMP\go.zip" https://go.dev/dl/go1.27.1.windows-amd64.zip
+Expand-Archive "$env:TEMP\go.zip" -DestinationPath "$env:TEMP\go-toolchain" -Force
+```
+
+```powershell
+# 2. 交叉編譯 linux/amd64 執行檔（純 Go，CGO 關閉）
+$go = "$env:TEMP\go-toolchain\go\bin\go.exe"
+$env:GOPATH = "$env:TEMP\go-path"; $env:GOTOOLCHAIN = 'local'
+$env:GOOS = 'linux'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
+cd agents\drivers\oracle-go
+& $go test ./...                      # 可選，主機平台執行
+& $go build -trimpath -ldflags="-s -w" -o "$env:TEMP\dbx-agent\agent" .
+```
+
+```powershell
+# 3. 備份舊 agent、安裝、重啟（先備份才救得回來）
+New-Item -ItemType Directory -Force "$env:TEMP\dbx-agent-backup" | Out-Null
+docker cp dbx-multi-account:/app/data/agents/drivers/oracle/agent "$env:TEMP\dbx-agent-backup\agent-official"
+docker cp "$env:TEMP\dbx-agent\agent" dbx-multi-account:/app/data/agents/drivers/oracle/agent
+docker exec dbx-multi-account chmod 755 /app/data/agents/drivers/oracle/agent
+docker restart dbx-multi-account
+```
 
 ```bash
-cd agents/drivers/oracle-go
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent .
-docker cp agent dbx-multi-account:/app/data/agents/drivers/oracle/agent
-docker restart dbx-multi-account      # 或只重新連線 Oracle
+# 4. 安裝前先確認新檔能在容器裡跑（handshake 應回協定版本 2）
+echo '{"id":1,"method":"handshake"}' > /tmp/handshake.json
+docker cp /tmp/handshake.json dbx-multi-account:/tmp/handshake.json
+docker exec dbx-multi-account sh -c "/app/data/agents/drivers/oracle/agent < /tmp/handshake.json"
 ```
 
 驗證：`select client_identifier, module, action, client_info from v$session where module = 'DBX';`
 若 `client_identifier` 是空的，代表容器裡跑的還是舊 agent（`docker exec dbx-multi-account ls -l /app/data/agents/drivers/oracle/` 看日期）。
+要還原官方版：把上面備份的檔案 `docker cp` 回同一個路徑再重啟即可。
 
 ---
 
