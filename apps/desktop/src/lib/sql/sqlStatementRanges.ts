@@ -254,6 +254,111 @@ const COMMON_SOFT_STATEMENT_START_KEYWORDS = [
 
 const SOFT_STATEMENT_FUNCTION_KEYWORDS = new Set(["REPLACE", "TRUNCATE"]);
 
+/**
+ * Keywords that continue the statement above them instead of starting a new one.
+ *
+ * Used only to decide whether a line that follows a blank line may start a new
+ * statement: a line opening with one of these (or with continuation punctuation,
+ * or indented) is treated as the continuation of the statement above, so an
+ * innocuous blank line inside a query (`SELECT a,` … blank … `FROM t`) never
+ * truncates the SQL that gets executed.
+ */
+const BLANK_LINE_CONTINUATION_KEYWORDS: ReadonlySet<string> = new Set([
+  "ALL",
+  "AND",
+  "AS",
+  "ASC",
+  "BETWEEN",
+  "BY",
+  "CASE",
+  "COLLATE",
+  "CONNECT",
+  "CROSS",
+  "CYCLE",
+  "DESC",
+  "DISTINCT",
+  "DO",
+  "ELSE",
+  "ELSEIF",
+  "ELSIF",
+  "END",
+  "ESCAPE",
+  "EXCEPT",
+  "EXISTS",
+  "FETCH",
+  "FIRST",
+  "FOR",
+  "FROM",
+  "FULL",
+  "GO",
+  "GROUP",
+  "HAVING",
+  "IN",
+  "INNER",
+  "INTERSECT",
+  "INTO",
+  "IS",
+  "JOIN",
+  "LAST",
+  "LATERAL",
+  "LEFT",
+  "LIKE",
+  "LIMIT",
+  "LOOP",
+  "MATCH_RECOGNIZE",
+  "MINUS",
+  "MODEL",
+  "NATURAL",
+  "NOT",
+  "NULLS",
+  "OFFSET",
+  "ON",
+  "OPTION",
+  "OR",
+  "ORDER",
+  "OUTER",
+  "OUTPUT",
+  "OVER",
+  "PARTITION",
+  "PIVOT",
+  "QUALIFY",
+  "RETURN",
+  "RETURNING",
+  "RIGHT",
+  "SAMPLE",
+  "SEARCH",
+  "SEPARATOR",
+  "SET",
+  "SORT",
+  "START",
+  "THEN",
+  "UNION",
+  "UNPIVOT",
+  "USING",
+  "VALUE",
+  "VALUES",
+  "WHEN",
+  "WHERE",
+  "WINDOW",
+  "WITHIN",
+]);
+
+/** Line-opening punctuation that can only continue the statement above. */
+const BLANK_LINE_CONTINUATION_PUNCTUATION = new Set([",", ")", "]", "}", ".", "+", "-", "*", "/", "%", "=", "<", ">", "|", "&", ":", "^", "~", "!"]);
+
+/**
+ * Whether a line opening after a blank line may start a new statement, or must
+ * stay attached to the statement above it.
+ */
+function startsStatementAfterBlankLine(sql: string, pos: number, lineStart: number): boolean {
+  // Indented lines continue the block above them; a fresh statement in a script
+  // starts at the left margin.
+  if (pos > lineStart) return false;
+  if (BLANK_LINE_CONTINUATION_PUNCTUATION.has(sql[pos])) return false;
+  const keyword = /^[A-Za-z_][\w$]*/.exec(sql.slice(pos, pos + 32))?.[0].toUpperCase();
+  return !(keyword && BLANK_LINE_CONTINUATION_KEYWORDS.has(keyword));
+}
+
 const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly string[]>> = {
   mysql: ["HANDLER", "LOAD", "OPTIMIZE", "REPAIR"],
   postgres: ["DO", "LISTEN", "NOTIFY", "UNLISTEN"],
@@ -680,9 +785,13 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
  */
 export function statementRangeAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {
   const pos = clampCursor(sql, cursorPos);
-  if (isCursorOnBlankLine(sql, pos)) return null;
-
   const statements = splitSqlStatementRanges(sql, databaseType, parameterOptions);
+  // A caret resting on a blank line belongs to the statement above it, so an
+  // empty line between statements (or right below one) still runs the SQL the
+  // user was looking at instead of reporting nothing. Mirrors the backend's
+  // `find_statement_at_cursor` rule that a caret without SQL after it on its
+  // line resolves to the previous statement.
+  if (isCursorOnBlankLine(sql, pos)) return nearestStatementRangeAt(sql, pos, statements, databaseType, parameterOptions);
   for (let index = 0; index < statements.length; index += 1) {
     const statement = statements[index];
     const softRanges = splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions);
@@ -902,6 +1011,10 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
   let parenDepth = 0;
   let lineStart = statement.from;
   let firstNonWhitespaceOnLine = -1;
+  // Consecutive whitespace-only lines. The statement above keeps its text, but a
+  // blank line is a hard boundary for whatever opens below it unless that line
+  // clearly continues the statement (see startsStatementAfterBlankLine).
+  let blankLineRun = 0;
   let i = statement.from;
 
   while (i < len) {
@@ -914,12 +1027,18 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
         const keyword = softStatementKeywordAt(sql, i, databaseType, parameterOptions);
         if (keyword) {
           starts.push({ hitFrom: lineStart, from: i, keyword });
+        } else if (blankLineRun >= 1 && startsStatementAfterBlankLine(sql, i, lineStart)) {
+          // A blank line ends the statement above it, so trailing prose that is
+          // not SQL (notes, stray ids) is never executed with the query.
+          starts.push({ hitFrom: lineStart, from: i, keyword: "" });
         }
       }
     }
 
     if (ch === "\n") {
       if (state === "lineComment") state = "none";
+      // Blank means whitespace-only: a comment-only line is content, not a separator.
+      blankLineRun = sql.slice(lineStart, i).trim() === "" ? blankLineRun + 1 : 0;
       lineStart = i + 1;
       firstNonWhitespaceOnLine = -1;
       i += 1;
@@ -2352,6 +2471,31 @@ function isCursorOnBlankLine(sql: string, pos: number): boolean {
   let lineEnd = sql.indexOf("\n", pos);
   if (lineEnd === -1) lineEnd = sql.length;
   return sql.slice(lineStart, lineEnd).trim() === "";
+}
+
+/**
+ * The statement a caret with no SQL under it belongs to: the closest statement
+ * above, or — when the caret sits above every statement — the closest one below.
+ * Soft ranges are used so a statement that holds several SQL blocks still
+ * targets the block nearest to the caret.
+ */
+function nearestStatementRangeAt(sql: string, pos: number, statements: RawStatement[], databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {
+  let previous: RawStatement | null = null;
+  for (const statement of statements) {
+    if (statement.to <= pos) {
+      previous = statement;
+      continue;
+    }
+    if (previous) {
+      const softRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType, parameterOptions);
+      return rangeFor(softRanges[softRanges.length - 1] ?? previous, sql);
+    }
+    const softRanges = splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions);
+    return rangeFor(softRanges[0] ?? statement, sql);
+  }
+  if (!previous) return null;
+  const softRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType, parameterOptions);
+  return rangeFor(softRanges[softRanges.length - 1] ?? previous, sql);
 }
 
 function isCursorOnStatementLine(sql: string, pos: number, statement: Pick<RawStatement, "from">): boolean {

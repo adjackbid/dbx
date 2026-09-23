@@ -1464,10 +1464,62 @@ FROM orders;`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "DO"), "postgres")?.sql.trim()).toBe("DO $$ BEGIN RAISE NOTICE 'x'; END $$");
   });
 
-  it("returns null when the cursor is on a blank line", () => {
+  it("resolves a caret on a blank line to the statement above it", () => {
     const sql = "SELECT 1;\n\nSELECT 2;";
     const blankLinePos = sql.indexOf("\n") + 1;
-    expect(statementRangeAtCursor(sql, blankLinePos)).toBeNull();
+    expect(statementRangeAtCursor(sql, blankLinePos)?.sql.trim()).toBe("SELECT 1");
+  });
+
+  it("resolves a caret on a blank line below a statement to that statement", () => {
+    // Reported repro: the caret sits on the empty line right under the query, so
+    // the ▶ button and F5 must keep targeting the SQL the user just wrote.
+    const sql = "SELECT *\nFROM MES_SEC_GRP_USER\n\n\nselect * from other_table";
+    const blankLinePos = sql.indexOf("\n\n") + 1;
+    expect(statementRangeAtCursor(sql, blankLinePos, "oracle")?.sql).toBe("SELECT *\nFROM MES_SEC_GRP_USER");
+  });
+
+  it("resolves a caret above every statement to the first statement", () => {
+    const sql = "\n\nSELECT 1;";
+    expect(statementRangeAtCursor(sql, 0)?.sql.trim()).toBe("SELECT 1");
+  });
+
+  it("ends the statement at a blank line so trailing notes are never executed", () => {
+    // Reported repro: the query is followed by a blank line and then by two lines
+    // of notes that are not SQL. Only the query may be sent to the database.
+    const sql = ["select * from MES_SEC_GRP_USER_LOG", "where sec_user_prfl_sid = 'T04971'", "", "A2020040709260444280000 --add", "A2020080310400274260000 --remove", "", "select * from MES_SEC_GRP msgr"].join("\n");
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "oracle"))).toEqual(["select * from MES_SEC_GRP_USER_LOG\nwhere sec_user_prfl_sid = 'T04971'", "A2020040709260444280000 --add\nA2020080310400274260000", "select * from MES_SEC_GRP msgr"]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "sec_user_prfl_sid"), "oracle")?.sql).toBe("select * from MES_SEC_GRP_USER_LOG\nwhere sec_user_prfl_sid = 'T04971'");
+  });
+
+  it("keeps a statement together across a blank line when the next line continues it", () => {
+    // Blank lines inside a query are formatting, not separators: the clause that
+    // follows must stay attached or the executed SQL would be truncated.
+    const clauseContinuation = "SELECT a,\n       b\n\nFROM t\n\nWHERE x = 1\nAND y = 2";
+    expect(rangeSqlTexts(executableStatementRanges(clauseContinuation))).toEqual([clauseContinuation]);
+
+    const indentedContinuation = "SELECT a\n\n    FROM t";
+    expect(rangeSqlTexts(executableStatementRanges(indentedContinuation))).toEqual([indentedContinuation]);
+
+    const cte = "WITH a AS (\n  SELECT 1\n)\n\nSELECT * FROM a";
+    expect(rangeSqlTexts(executableStatementRanges(cte))).toEqual([cte]);
+
+    const parenthesized = "SELECT *\nFROM (\n  SELECT 1\n\n  UNION ALL\n  SELECT 2\n) t";
+    expect(rangeSqlTexts(executableStatementRanges(parenthesized))).toEqual([parenthesized]);
+
+    const setOperation = "SELECT 1\nUNION\n\nSELECT 2";
+    expect(rangeSqlTexts(executableStatementRanges(setOperation))).toEqual([setOperation]);
+  });
+
+  it("ignores blank lines that follow a statement terminator", () => {
+    const sql = "select 1;\n\n\nselect 2;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["select 1", "select 2"]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "2"))?.sql.trim()).toBe("select 2");
+  });
+
+  it("still resolves the trailing blank line of a document to the last statement", () => {
+    const sql = "SELECT 1;\nSELECT 2;\n";
+    expect(statementRangeAtCursor(sql, sql.length)?.sql.trim()).toBe("SELECT 2");
   });
 
   it("returns null for an empty document", () => {
@@ -1688,11 +1740,12 @@ describe("currentExecutableStatementRange", () => {
     expect(currentExecutableStatementRange(sql, indexOf(sql, "close_reason"), "mysql")?.sql.trim()).toBe(sql.slice(0, sql.indexOf(";\nSELECT")));
   });
 
-  it("returns null on blank and pure comment lines", () => {
+  it("returns null on pure comment lines but resolves a blank line to the statement above", () => {
     const sql = "SELECT 1;\n-- comment\n\nSELECT 2;";
 
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "mysql")).toBeNull();
-    expect(currentExecutableStatementRange(sql, sql.indexOf("\n\n") + 1, "mysql")).toBeNull();
+    // A blank line has no SQL of its own: the caret falls back to the statement above it.
+    expect(currentExecutableStatementRange(sql, sql.indexOf("\n\n") + 1, "mysql")?.sql.trim()).toBe("SELECT 1");
   });
 
   it("uses the current Redis command line", () => {
@@ -1952,14 +2005,14 @@ WHERE t2.product_name = '12345'
     expect(candidates[0].kind).toBe("all");
   });
 
-  it("returns only 'all' when the cursor is on a blank line", () => {
+  it("keeps 'cursor' available when the cursor is on a blank line", () => {
     const sql = "SELECT 1;\n\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, sql.indexOf("\n") + 1);
-    expect(candidateKinds(candidates)).toEqual(["all"]);
-    expect(candidates[0].supportedKinds).toEqual(["all"]);
-    expect(executionCandidateForMode(candidates, "current")).toBeNull();
-    expect(executionCandidateForMode(candidates, "current", { executeAllOnBlankLine: true })).toBe(candidates[0]);
-    expect(executionCandidateForMode(candidates, "all")).toBe(candidates[0]);
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    // The blank line belongs to the statement above it, so "current" still runs
+    // one statement instead of falling back to the whole document.
+    expect(executionCandidateForMode(candidates, "current")?.sql.trim()).toBe("SELECT 1");
+    expect(executionCandidateForMode(candidates, "all")).toBe(candidates[1]);
   });
 
   it("marks a deduplicated single-statement candidate as both current and all", () => {
@@ -1974,10 +2027,13 @@ WHERE t2.product_name = '12345'
   });
 
   it("returns only 'all' when the cursor has no statement but the document has SQL", () => {
-    // Cursor past the end on a trailing blank line.
-    const sql = "SELECT 1;\nSELECT 2;\n";
-    const candidates = buildExecutionCandidates(sql, sql.length);
+    // A comment-only line carries no SQL of its own, so only the document-wide
+    // candidate exists and `executeAllOnBlankLine` decides the fallback.
+    const sql = "SELECT 1;\n-- comment\n";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "comment"));
     expect(candidateKinds(candidates)).toEqual(["all"]);
+    expect(executionCandidateForMode(candidates, "current")).toBeNull();
+    expect(executionCandidateForMode(candidates, "current", { executeAllOnBlankLine: true })).toBe(candidates[0]);
   });
 
   it("uses the MySQL statement body for delimiter scripts", () => {
