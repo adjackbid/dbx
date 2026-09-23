@@ -917,6 +917,10 @@ onBeforeUnmount(() => {
               <span class="mx-1.5 text-border">·</span>{{ t("pluginPlatform.marketplaceGuideDescription") }}
             </div>
           </div>
+          <div v-if="!canManagePlugins" data-plugin-admin-only-notice class="flex items-start gap-2.5 rounded-xl border border-dashed bg-muted/20 px-4 py-3 text-xs leading-5 text-muted-foreground">
+            <ShieldCheck class="mt-0.5 size-3.5 shrink-0" />
+            <div class="min-w-0 flex-1">{{ t("settings.adminOnlySetting") }}</div>
+          </div>
           <div class="flex w-full flex-col gap-2 rounded-xl border bg-card/70 p-3 sm:flex-row sm:items-center">
             <div class="relative">
               <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
@@ -952,7 +956,7 @@ onBeforeUnmount(() => {
                   <List class="size-3.5" />
                 </button>
               </div>
-              <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
+              <Button v-if="canManagePlugins" variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
               <Button variant="ghost" size="icon-sm" class="shrink-0" :disabled="marketplaceLoading" :title="t('common.refresh')" :aria-label="t('common.refresh')" @click="refreshMarketplace"><RefreshCw class="size-3.5" :class="marketplaceLoading ? 'animate-spin' : ''" /></Button>
             </div>
           </div>
@@ -1049,9 +1053,10 @@ onBeforeUnmount(() => {
                 </div>
                 <button
                   type="button"
-                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gray-100 dark:bg-gray-800 dark:disabled:hover:bg-gray-800"
                   :class="marketplaceActionClass(listing)"
                   :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning || !canManagePlugins"
+                  :title="canManagePlugins ? undefined : t('settings.adminOnlySetting')"
                   @click="installMarketplaceListing(listing)"
                 >
                   <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -1116,9 +1121,10 @@ onBeforeUnmount(() => {
               </div>
               <button
                 type="button"
-                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gray-100 dark:bg-gray-800 dark:disabled:hover:bg-gray-800"
                 :class="marketplaceActionClass(listing)"
                 :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning || !canManagePlugins"
+                :title="canManagePlugins ? undefined : t('settings.adminOnlySetting')"
                 @click="installMarketplaceListing(listing)"
               >
                 <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />

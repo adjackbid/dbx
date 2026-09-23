@@ -793,7 +793,7 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
 });
 
 describe("PluginContributionsPanel admin gating", () => {
-  it("disables plugin management for a non-admin account in Web mode", async () => {
+  it("blocks plugin management for a non-admin account in Web mode", async () => {
     mocks.userStore.isAdmin = false;
     app.unmount();
     host.remove();
@@ -811,10 +811,30 @@ describe("PluginContributionsPanel admin gating", () => {
     for (const view of ["grid", "list"] as const) {
       gated.marketplaceViewMode = view;
       await nextTick();
-      for (const key of ["batchInstallUpdate", "marketplaceStatus.update", "uninstall", "rollback", "installPackage", "installFromUrl"]) {
+      for (const key of ["marketplaceStatus.update", "uninstall", "rollback", "installPackage", "installFromUrl"]) {
         expect(button(key).disabled, `${view}: ${key}`).toBe(true);
       }
     }
+    // Batch management is not offered at all to an account that cannot install.
+    expect(host.textContent).not.toContain("pluginPlatform.batchManage");
     expect(host.textContent).toContain("settings.adminOnlySetting");
+    expect(host.querySelector("[data-plugin-admin-only-notice]")).not.toBeNull();
+  });
+
+  it("still lets a desktop install manage plugins", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    mocks.userStore.isAdmin = false;
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    const desktop = instance.$.setupState;
+    await flushUi();
+    desktop.selectedPluginId = "a";
+    await nextTick();
+    expect(button("uninstall").disabled).toBe(false);
+    expect(button("marketplaceStatus.update").disabled).toBe(false);
   });
 });
