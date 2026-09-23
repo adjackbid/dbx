@@ -331,10 +331,12 @@ pub async fn uninstall_plugin(
     State(state): State<Arc<WebState>>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<Vec<InstalledPluginInfo>>, AppError> {
+    // Plugins are installed once per instance, so the dependency check must see
+    // every account's connections — not just the signed-in one.
     let dependent_connections = state
         .app
         .storage
-        .load_connections("")
+        .load_all_connections()
         .await
         .map_err(AppError::from)?
         .into_iter()
