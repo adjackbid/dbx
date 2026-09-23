@@ -7,9 +7,9 @@ use dbx_core::cloud_sync::{
     forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
     resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
-    save_snippet_sync_id as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
+    save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
     save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
-    snippet_sync_settings as core_snippet_sync_settings, webdav_saved_password_status,
+    snippet_sync_settings_for_instance as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
     SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
     WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
@@ -111,12 +111,14 @@ pub struct SnippetDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SnippetSyncSettingsRequest {
     pub provider: SnippetProvider,
+    pub instance_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSnippetSyncIdRequest {
     pub provider: SnippetProvider,
+    pub instance_url: Option<String>,
     pub snippet_id: Option<String>,
 }
 
@@ -253,7 +255,7 @@ pub async fn snippet_sync_test(
 ) -> Result<Json<()>, AppError> {
     require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
-    SnippetSyncClient::new(req.config).test().await.map_err(AppError::from)?;
+    SnippetSyncClient::new(req.config).map_err(AppError::from)?.test().await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -292,7 +294,10 @@ pub async fn snippet_sync_settings(
     Json(req): Json<SnippetSyncSettingsRequest>,
 ) -> Result<Json<SnippetSyncSettings>, AppError> {
     require_admin(&session)?;
-    core_snippet_sync_settings(&state.app.storage, req.provider).await.map(Json).map_err(AppError::from)
+    core_snippet_sync_settings(&state.app.storage, req.provider, req.instance_url.as_deref())
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 pub async fn save_snippet_sync_id(
@@ -301,7 +306,7 @@ pub async fn save_snippet_sync_id(
     Json(req): Json<SaveSnippetSyncIdRequest>,
 ) -> Result<Json<()>, AppError> {
     require_admin(&session)?;
-    core_save_snippet_sync_id(&state.app.storage, req.provider, req.snippet_id.as_deref())
+    core_save_snippet_sync_id(&state.app.storage, req.provider, req.instance_url.as_deref(), req.snippet_id.as_deref())
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
@@ -315,7 +320,7 @@ pub async fn retry_snippet_legacy_cleanup(
     require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let provider = req.config.provider;
-    let client = SnippetSyncClient::new(req.config);
+    let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     retry_pending_snippet_cleanup(&state.app.storage, provider, &client).await.map(Json).map_err(AppError::from)
 }
 
@@ -341,7 +346,7 @@ pub async fn snippet_sync_upload(
         build_sync_snapshot(&state.app.storage, env!("CARGO_PKG_VERSION"), req.editor_settings, secrets_passphrase)
             .await
             .map_err(AppError::from)?;
-    let client = SnippetSyncClient::new(req.config);
+    let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     let mut summary = client
         .put_snapshot(&snapshot, req.snippet_passphrase.as_deref(), secrets_passphrase)
         .await
@@ -358,6 +363,7 @@ pub async fn snippet_sync_download(
     require_admin(&session)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
     let (snapshot, summary) = SnippetSyncClient::new(req.config)
+        .map_err(AppError::from)?
         .get_snapshot(req.snippet_passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
@@ -422,6 +428,7 @@ mod tests {
             Json(super::SnippetConfigRequest {
                 config: dbx_core::cloud_sync::SnippetSyncConfig {
                     provider: SnippetProvider::GitHub,
+                    instance_url: None,
                     token: None,
                     snippet_id: None,
                     replace_legacy_snippet: false,
@@ -463,7 +470,7 @@ mod tests {
                 created_at: 0,
                 last_accessed_at: 0,
             }),
-            Json(super::SnippetSyncSettingsRequest { provider: SnippetProvider::GitHub }),
+            Json(super::SnippetSyncSettingsRequest { provider: SnippetProvider::GitHub, instance_url: None }),
         )
         .await
         .unwrap();

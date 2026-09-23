@@ -3,7 +3,8 @@ import { mysqlUserAccount, quoteMySqlIdentifier, quotePostgresIdentifier, type C
 
 export type AuthorizationAccountType = "standard" | "admin";
 export type AuthorizationPreset = "readWrite" | "readOnly" | "ddl" | "dml" | "custom";
-export type AuthorizationStepOperation = "createUser" | "grantAdmin" | "createDatabase" | "grantDatabase" | "grantCurrentObjects" | "grantFutureObjects";
+export type AuthorizationTargetScope = "database" | "table";
+export type AuthorizationStepOperation = "createUser" | "grantAdmin" | "createDatabase" | "grantDatabase" | "revokePrivileges" | "grantCurrentObjects" | "grantFutureObjects";
 export type AuthorizationObjectScope = "schemas" | "tables" | "sequences" | "functions";
 
 export interface DatabaseAuthorizationSelection {
@@ -11,6 +12,7 @@ export interface DatabaseAuthorizationSelection {
   preset: AuthorizationPreset;
   privileges?: string[];
   schemas?: string[];
+  tables?: string[];
 }
 
 export interface AuthorizationPlanStep {
@@ -22,6 +24,7 @@ export interface AuthorizationPlanStep {
   operation: AuthorizationStepOperation;
   subject?: string;
   targetDatabase?: string;
+  targetTable?: string;
   objectScope?: AuthorizationObjectScope;
   schema?: string;
   owner?: string;
@@ -60,6 +63,8 @@ const MYSQL_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = 
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES", "LOCK TABLES"],
 };
 
+const MYSQL_TABLE_PRIVILEGES = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "SHOW VIEW", "CREATE VIEW", "TRIGGER"]);
+
 const POSTGRES_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = {
   readOnly: ["SELECT"],
   dml: ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -67,15 +72,18 @@ const POSTGRES_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]>
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "EXECUTE", "CREATE", "TEMPORARY"],
 };
 
-export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = []): string[] {
-  if (preset === "custom") return uniquePrivileges(custom);
-  return [...(provider.dialect === "mysql" ? MYSQL_PRESETS[preset] : POSTGRES_PRESETS[preset])];
+export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database"): string[] {
+  const privileges = preset === "custom" ? uniquePrivileges(custom) : [...(provider.dialect === "mysql" ? MYSQL_PRESETS[preset] : POSTGRES_PRESETS[preset])];
+  return provider.dialect === "mysql" && targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
 }
 
-export function authorizationPrivileges(provider: DatabaseUserAdminProvider): string[] {
+export function authorizationPrivileges(provider: DatabaseUserAdminProvider, targetScope: AuthorizationTargetScope = "database"): string[] {
   const privilegesForScope = provider.privilegesForScope;
   if (!privilegesForScope) return [];
-  if (provider.dialect === "mysql") return Array.from(privilegesForScope("mysql"));
+  if (provider.dialect === "mysql") {
+    const privileges = Array.from(privilegesForScope("mysql"));
+    return targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
+  }
   return uniquePrivileges([...privilegesForScope("database"), ...privilegesForScope("schema"), ...privilegesForScope("table"), "EXECUTE", "USAGE", "UPDATE"]);
 }
 
@@ -116,21 +124,78 @@ export function buildCreateUserAuthorizationPlan(input: CreateUserAuthorizationP
   for (const selection of input.databases) {
     const database = selection.database.trim();
     if (!database) continue;
-    const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges);
     if (input.provider.dialect === "mysql") {
-      steps.push({
-        id: `grant-${steps.length}`,
-        label: `grant ${input.provider.label(identity)} access to ${database}`,
-        database: "",
-        sql: input.provider.grantPrivilegesSql({ user: identity, privileges, database, table: "*", scope: "mysql" }),
-        dependsOn: [createStepId],
-        operation: "grantDatabase",
-        subject: input.provider.label(identity),
-        targetDatabase: database,
-      });
+      const targetScope = input.provider.supportsTableGrantsOnCreate && selection.tables !== undefined ? "table" : "database";
+      const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+      const tables = targetScope === "database" ? ["*"] : uniqueNames(selection.tables ?? []);
+      for (const table of tables) {
+        steps.push({
+          id: `grant-${steps.length}`,
+          label: `grant ${input.provider.label(identity)} access to ${table === "*" ? database : `${database}.${table}`}`,
+          database: "",
+          sql: input.provider.grantPrivilegesSql({ user: identity, privileges, database, table, scope: "mysql" }),
+          dependsOn: [createStepId],
+          operation: "grantDatabase",
+          subject: input.provider.label(identity),
+          targetDatabase: database,
+          targetTable: table === "*" ? undefined : table,
+        });
+      }
       continue;
     }
+    const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges);
     steps.push(...postgresDatabaseAuthorizationSteps(identity, database, privileges, selection.schemas ?? ["public"], createStepId, steps.length));
+  }
+  return { steps };
+}
+
+export interface GrantAuthorizationPlanInput {
+  provider: DatabaseUserAdminProvider;
+  /** 目标用户身份 */
+  user: DatabaseUserIdentity;
+  /** 需要授权（或撤权）的库/表选择 */
+  databases: DatabaseAuthorizationSelection[];
+  /** 是否携带 WITH GRANT OPTION，仅对授权语句生效 */
+  grantOption?: boolean;
+  /** 为 true 时生成 REVOKE，默认生成 GRANT */
+  revoke?: boolean;
+}
+
+/**
+ * 为“已存在的用户”构造授权计划：把多库/多表选择展开为多条独立的 GRANT / REVOKE。
+ * 与 buildCreateUserAuthorizationPlan 的差异：
+ * 1. 不包含创建用户步骤，因此各步骤之间没有依赖关系；
+ * 2. 采用追加式语义，只对勾选的库/表生成语句，不做差异比对，也不会回收用户已有的多余权限；
+ * 3. 目前仅用于 MySQL 表级/库级授权，其它方言返回空计划，由调用方沿用原有的单条 SQL 逻辑。
+ */
+export function buildGrantAuthorizationPlan(input: GrantAuthorizationPlanInput): AuthorizationPlan {
+  const changePrivilegesSql = input.revoke ? input.provider.revokePrivilegesSql : input.provider.grantPrivilegesSql;
+  if (!changePrivilegesSql) return { steps: [] };
+  // 以 provider 的库/表级授权能力作为判据：Doris / StarRocks 的 dialect 同为 "mysql"，
+  // 但它们的权限名与 MySQL 预设不同（SELECT_PRIV 等），仅比较 dialect 会生成无效语句。
+  if (!input.provider.supportsTableGrantsOnCreate) return { steps: [] };
+  const steps: AuthorizationPlanStep[] = [];
+  for (const selection of input.databases) {
+    const database = selection.database.trim();
+    if (!database) continue;
+    // 指定了表则按表级生效，否则作用于该库下的全部表
+    const targetScope = input.provider.supportsTableGrantsOnCreate && selection.tables !== undefined ? "table" : "database";
+    const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+    if (privileges.length === 0) continue;
+    const tables = targetScope === "database" ? ["*"] : uniqueNames(selection.tables ?? []);
+    for (const table of tables) {
+      const targetTable = table === "*" ? undefined : table;
+      steps.push({
+        id: `change-${steps.length}`,
+        label: `${input.revoke ? "revoke" : "grant"} ${input.provider.label(input.user)} ${targetTable ? `${database}.${targetTable}` : database}`,
+        database: "",
+        sql: changePrivilegesSql({ user: input.user, privileges, database, table, grantOption: input.grantOption, scope: "mysql" }),
+        operation: input.revoke ? "revokePrivileges" : "grantDatabase",
+        subject: input.provider.label(input.user),
+        targetDatabase: database,
+        targetTable,
+      });
+    }
   }
   return { steps };
 }
@@ -416,6 +481,10 @@ function uniqueSchemas(schemaNames: string[]): string[] {
 
 function uniquePrivileges(privileges: string[]): string[] {
   return Array.from(new Set(privileges.map((privilege) => privilege.trim().toUpperCase()).filter(Boolean)));
+}
+
+function uniqueNames(names: string[]): string[] {
+  return Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
 }
 
 function queryResultMessage(result: QueryResult): string {

@@ -1,5 +1,7 @@
-import type { ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
+import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
@@ -8,7 +10,8 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  collectionKind?: MongoCollectionKind;
   valid?: boolean | null;
   signature?: string | null;
   comment?: string | null;
@@ -24,7 +27,6 @@ export type ObjectBrowserRow = {
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
-export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
 export type ObjectBrowserPinnedTreeNodeContext = {
@@ -42,6 +44,7 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   if (type === "PROCEDURE") return "procedure";
   if (type === "FUNCTION") return "function";
   if (type === "TRIGGER") return "trigger";
+  if (type === "EVENT") return "event";
   if (type === "SEQUENCE") return "sequence";
   if (type === "PACKAGE_BODY") return "package-body";
   if (type === "PACKAGE") return "package";
@@ -118,6 +121,7 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
               {
                 name: row.name,
                 table_type: row.type,
+                valid: row.valid,
                 comment: row.comment,
                 parent_schema: row.partitionParentSchema,
                 parent_name: row.partitionParentName,
@@ -142,6 +146,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
   if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("EVENT")) return "EVENT";
   if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
@@ -187,6 +192,28 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
   return rows;
 }
 
+export function buildMongoObjectBrowserRows(options: { collections: Array<{ name: string; kind?: string | null }>; database: string }): ObjectBrowserRow[] {
+  const seen = new Map<string, number>();
+  return options.collections.flatMap((collection) => {
+    const name = collection.name;
+    if (!name) return [];
+    const collectionKind = toMongoCollectionKind(collection.kind);
+    const type: ObjectBrowserRow["type"] = collectionKind === "view" ? "VIEW" : "TABLE";
+    const baseId = `${options.database}:${name}:${type}:${collectionKind}`;
+    const index = seen.get(baseId) ?? 0;
+    seen.set(baseId, index + 1);
+    return [
+      {
+        id: `${baseId}:${index}`,
+        name,
+        displayName: name,
+        type,
+        collectionKind,
+      },
+    ];
+  });
+}
+
 function routineSignatureForDisplay(type: ObjectBrowserRow["type"], signature: string | null | undefined): string | undefined {
   if (type !== "PROCEDURE" && type !== "FUNCTION") return undefined;
   if (signature == null) return undefined;
@@ -217,6 +244,78 @@ function markPartitionRows(rows: ObjectBrowserRow[], fallbackSchema: string) {
   }
 }
 
+export type ObjectBrowserRowSorter = (rows: ObjectBrowserRow[]) => ObjectBrowserRow[];
+
+/**
+ * Flattens the object rows into render order: roots first, each followed by its
+ * partition children — recursively, because a PostgreSQL partition can itself be
+ * a partitioned parent (a second-level sub-partitioned table).
+ *
+ * `depths` carries each partition row's nesting level so the caller can indent
+ * it; roots are 0.
+ *
+ * `rows`/`matchingRows` are expected to be pre-filtered by the caller's type
+ * filter. When `query` is non-empty the tree is force-expanded so a deep match
+ * and the ancestors leading to it stay visible even while collapsed.
+ */
+export function groupObjectBrowserRows(options: { rows: readonly ObjectBrowserRow[]; matchingRows: readonly ObjectBrowserRow[]; query: string; expandedPartitionParentIds: ReadonlySet<string>; sortRows: ObjectBrowserRowSorter }): { rows: ObjectBrowserRow[]; depths: Map<string, number> } {
+  const { rows, matchingRows, query, expandedPartitionParentIds, sortRows } = options;
+  const candidateIds = new Set(rows.map((row) => row.id));
+  const matchingIds = new Set(matchingRows.map((row) => row.id));
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+
+  const partitionRowsByParentId = new Map<string, ObjectBrowserRow[]>();
+  for (const row of rows) {
+    if (!row.partitionParentId) continue;
+    const group = partitionRowsByParentId.get(row.partitionParentId) ?? [];
+    group.push(row);
+    partitionRowsByParentId.set(row.partitionParentId, group);
+  }
+
+  // A deep match must be reachable: pull in every ancestor that leads to it, or
+  // the match would be filtered out as an orphaned sub-partition.
+  const ancestorIdsWithMatchingPartitions = new Set<string>();
+  if (query) {
+    for (const row of matchingRows) {
+      let ancestorId = row.partitionParentId;
+      while (ancestorId && !ancestorIdsWithMatchingPartitions.has(ancestorId)) {
+        ancestorIdsWithMatchingPartitions.add(ancestorId);
+        ancestorId = rowById.get(ancestorId)?.partitionParentId;
+      }
+    }
+  }
+
+  const rootRows = rows.filter((row) => {
+    if (row.partitionParentId) return false;
+    if (!query) return true;
+    return matchingIds.has(row.id) || ancestorIdsWithMatchingPartitions.has(row.id);
+  });
+  const result: ObjectBrowserRow[] = [];
+  const depths = new Map<string, number>();
+
+  const appendPartitions = (parent: ObjectBrowserRow, depth: number) => {
+    const partitions = partitionRowsByParentId.get(parent.id)?.filter((partition) => candidateIds.has(partition.id));
+    if (!partitions?.length) return;
+    // Search force-expands the tree so every match (and its ancestor chain) is visible.
+    if (!query && !expandedPartitionParentIds.has(parent.id)) return;
+    const parentMatches = matchingIds.has(parent.id);
+    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id) || ancestorIdsWithMatchingPartitions.has(partition.id)) : partitions;
+    for (const partition of sortRows(visiblePartitions)) {
+      result.push(partition);
+      depths.set(partition.id, depth);
+      appendPartitions(partition, depth + 1);
+    }
+  };
+
+  for (const row of sortRows(rootRows)) {
+    result.push(row);
+    depths.set(row.id, 0);
+    appendPartitions(row, 1);
+  }
+
+  return { rows: result, depths };
+}
+
 function objectKey(row: Pick<ObjectBrowserRow, "schema" | "name" | "type">, fallbackSchema: string) {
   return `${row.type}\0${(row.schema || fallbackSchema).toLowerCase()}\0${row.name.toLowerCase()}`;
 }
@@ -231,9 +330,14 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
   if (!q) return rows;
   const regex = parseSlashDelimitedRegexQuery(query.trim());
   if (regex) {
-    return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
+    // Object type labels ("TABLE", "VIEW", "PROCEDURE", ...) are deliberately
+    // not searchable: a query like "TAB" would otherwise match every TABLE row
+    // via its type label (issue #6488). The type filter buttons cover type
+    // scoping, and every other search path (sidebar tree, backend metadata)
+    // matches names and comments only.
+    return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
 }
 
 export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {
@@ -245,6 +349,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     procedures: 0,
     functions: 0,
     triggers: 0,
+    events: 0,
     sequences: 0,
     packages: 0,
     types: 0,
@@ -257,6 +362,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     else if (row.type === "PROCEDURE") counts.procedures++;
     else if (row.type === "FUNCTION") counts.functions++;
     else if (row.type === "TRIGGER") counts.triggers++;
+    else if (row.type === "EVENT") counts.events++;
     else if (row.type === "SEQUENCE") counts.sequences++;
     else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
     else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;

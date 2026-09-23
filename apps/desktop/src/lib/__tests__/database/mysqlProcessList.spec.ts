@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { buildKillSql, clampInterval, createProcessListLoadCoordinator, mapProcessRows, processListExecutionError, processListSessionCount, supportsProcessList } from "@/lib/database/mysqlProcessList";
+import { buildCancelQuerySql, buildTerminateSessionSql, clampInterval, createProcessListLoadCoordinator, mapProcessRows, processListExecutionError, processListSessionCount, supportsProcessList } from "@/lib/database/mysqlProcessList";
 
 function result(columns: string[], rows: (string | number | boolean | null)[][]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 0 };
@@ -35,15 +35,29 @@ describe("mapProcessRows", () => {
   });
 });
 
-describe("buildKillSql", () => {
-  it("builds KILL CONNECTION for a valid id", () => {
-    expect(buildKillSql(8213)).toBe("KILL CONNECTION 8213");
+describe("buildCancelQuerySql", () => {
+  it("builds KILL QUERY for a valid id without disconnecting the session", () => {
+    expect(buildCancelQuerySql(8213)).toBe("KILL QUERY 8213");
   });
 
-  it("rejects non-integer or negative ids", () => {
-    expect(() => buildKillSql(1.5)).toThrow();
-    expect(() => buildKillSql(-1)).toThrow();
-    expect(() => buildKillSql(Number.NaN)).toThrow();
+  it("rejects non-integer or nonpositive ids", () => {
+    expect(() => buildCancelQuerySql(1.5)).toThrow();
+    expect(() => buildCancelQuerySql(0)).toThrow();
+    expect(() => buildCancelQuerySql(-1)).toThrow();
+    expect(() => buildCancelQuerySql(Number.NaN)).toThrow();
+  });
+});
+
+describe("buildTerminateSessionSql", () => {
+  it("builds KILL for a valid id so an idle session is really disconnected", () => {
+    expect(buildTerminateSessionSql(8213)).toBe("KILL 8213");
+  });
+
+  it("rejects non-integer or nonpositive ids", () => {
+    expect(() => buildTerminateSessionSql(1.5)).toThrow();
+    expect(() => buildTerminateSessionSql(0)).toThrow();
+    expect(() => buildTerminateSessionSql(-1)).toThrow();
+    expect(() => buildTerminateSessionSql(Number.NaN)).toThrow();
   });
 });
 

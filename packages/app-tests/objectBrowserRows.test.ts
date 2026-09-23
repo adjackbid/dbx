@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, sortObjectBrowserRows, summarizeObjectBrowserSearch } from "../../apps/desktop/src/lib/table/objectBrowserRows.ts";
+import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, groupObjectBrowserRows, sortObjectBrowserRows, summarizeObjectBrowserSearch } from "../../apps/desktop/src/lib/table/objectBrowserRows.ts";
 
 test("builds unique row ids for overloaded routines with the same visible name", () => {
   const rows = buildObjectBrowserRows({
@@ -94,7 +94,7 @@ test("object browser rows normalize space separated materialized views", () => {
   );
 });
 
-test("object browser search matches names, types, and comments but not schema names", () => {
+test("object browser search matches names and comments but not schema names", () => {
   const rows = buildObjectBrowserRows({
     objects: [
       { name: "users", object_type: "TABLE", schema: "exam_hub", comment: "account records" },
@@ -110,6 +110,37 @@ test("object browser search matches names, types, and comments but not schema na
     filterObjectBrowserRows(rows, "exam").map((row) => row.name),
     ["orders", "refresh_exam_stats"],
   );
+});
+
+test("object browser search matches names, never object type labels", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "tab_history", object_type: "TABLE", schema: "public" },
+      { name: "user_accounts", object_type: "TABLE", schema: "public", comment: "user account records" },
+      { name: "v_sales_summary", object_type: "VIEW", schema: "public" },
+      { name: "refresh_sales", object_type: "PROCEDURE", schema: "public" },
+    ],
+    database: "app",
+    fallbackSchema: "public",
+    needsSchema: true,
+  });
+
+  const names = (query: string) => filterObjectBrowserRows(rows, query).map((row) => row.name);
+
+  // "TAB" must not surface every TABLE row through its type label (issue #6488).
+  assert.deepEqual(names("TAB"), ["tab_history"]);
+  assert.deepEqual(names("tab"), ["tab_history"]);
+  assert.deepEqual(names("Tab"), ["tab_history"]);
+  assert.deepEqual(names("TABLE"), []);
+  assert.deepEqual(names("VIEW"), []);
+  // Name prefix and middle-substring matching keep working.
+  assert.deepEqual(names("sales"), ["v_sales_summary", "refresh_sales"]);
+  assert.deepEqual(names("history"), ["tab_history"]);
+  // Comment matching keeps working.
+  assert.deepEqual(names("accounts"), ["user_accounts"]);
+  // Non-existent keywords return nothing; empty queries keep everything.
+  assert.deepEqual(names("TAB1"), []);
+  assert.equal(names("   ").length, rows.length);
 });
 
 test("object browser search supports slash-delimited regular expression queries", () => {
@@ -354,4 +385,74 @@ test("object browser rows use explicit partition metadata before name heuristics
 test("object browser timestamp display strips timezone suffixes", () => {
   assert.equal(formatObjectBrowserTimestamp("2026-05-22 10:18:24+08"), "2026-05-22 10:18:24");
   assert.equal(formatObjectBrowserTimestamp("2026-05-22 10:18:24.123456+08:00"), "2026-05-22 10:18:24");
+});
+
+function nestedPartitionRows() {
+  return buildObjectBrowserRows({
+    objects: [
+      { name: "catalog_nested", object_type: "TABLE" },
+      { name: "catalog_nested_2024", object_type: "TABLE", parent_schema: "public", parent_name: "catalog_nested" },
+      { name: "catalog_nested_2025", object_type: "TABLE", parent_schema: "public", parent_name: "catalog_nested" },
+      { name: "catalog_nested_2024_asia", object_type: "TABLE", parent_schema: "public", parent_name: "catalog_nested_2024" },
+      { name: "catalog_nested_2024_eu", object_type: "TABLE", parent_schema: "public", parent_name: "catalog_nested_2024" },
+      { name: "plain", object_type: "TABLE" },
+    ],
+    database: "test",
+    fallbackSchema: "public",
+    needsSchema: false,
+  });
+}
+
+function group(rows, expandedIds, query = "", matchingRows = rows) {
+  return groupObjectBrowserRows({
+    rows,
+    matchingRows,
+    query,
+    expandedPartitionParentIds: new Set(expandedIds),
+    sortRows: (items) => sortObjectBrowserRows(items, "name", "asc"),
+  });
+}
+
+test("recurses through second-level sub-partitions instead of dropping them", () => {
+  const rows = nestedPartitionRows();
+  const root = rows.find((row) => row.name === "catalog_nested");
+  const year = rows.find((row) => row.name === "catalog_nested_2024");
+  assert.ok(root && year);
+
+  const result = group(rows, [root.id, year.id]);
+
+  assert.deepEqual(
+    result.rows.map((row) => row.name),
+    ["catalog_nested", "catalog_nested_2024", "catalog_nested_2024_asia", "catalog_nested_2024_eu", "catalog_nested_2025", "plain"],
+  );
+  // Indentation depth drives the row indent in the UI.
+  assert.deepEqual(
+    result.rows.map((row) => result.depths.get(row.id)),
+    [0, 1, 2, 2, 1, 0],
+  );
+});
+
+test("only shows partition levels whose parent is expanded", () => {
+  const rows = nestedPartitionRows();
+  const root = rows.find((row) => row.name === "catalog_nested");
+  assert.ok(root);
+
+  assert.deepEqual(group(rows, []).rows.map((row) => row.name), ["catalog_nested", "plain"]);
+  assert.deepEqual(
+    group(rows, [root.id]).rows.map((row) => row.name),
+    ["catalog_nested", "catalog_nested_2024", "catalog_nested_2025", "plain"],
+  );
+});
+
+test("a deep search match stays reachable while collapsed", () => {
+  const rows = nestedPartitionRows();
+  const match = rows.filter((row) => row.name === "catalog_nested_2024_asia");
+  assert.equal(match.length, 1);
+
+  // Collapsed (no expanded ids) and a query: the match must be shown under its
+  // ancestor chain, not dropped as an orphaned third-level partition.
+  const result = group(rows, [], "asia", match);
+
+  assert.deepEqual(result.rows.map((row) => row.name), ["catalog_nested", "catalog_nested_2024", "catalog_nested_2024_asia"]);
+  assert.deepEqual(result.rows.map((row) => result.depths.get(row.id)), [0, 1, 2]);
 });

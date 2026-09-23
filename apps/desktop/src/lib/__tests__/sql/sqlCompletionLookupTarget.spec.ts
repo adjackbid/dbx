@@ -8,7 +8,12 @@ import {
   resolveSqlCompletionScope,
   resolveSqlCompletionTableLookupTarget,
   resolveSqlServerUseDatabaseCompletion,
+  replaceSqlServerLeadingUseQuery,
+  sqlServerLeadingUseScript,
   sqlServerUseCompletionDatabaseNames,
+  sqlServerUseDatabaseFromStatement,
+  switchesDatabaseWithUseStatement,
+  useDatabaseFromStatement,
 } from "@/lib/sql/sqlCompletionLookupTarget";
 
 describe("sqlCompletionLookupTarget", () => {
@@ -271,6 +276,49 @@ describe("sqlCompletionLookupTarget", () => {
     });
 
     expect(scope.database).toBe("Bar]DB");
+  });
+
+  it("isolates a final query after SQL Server USE batches and preserves the script shell", () => {
+    const sql = "-- target\nUSE FooDB;\nGO\nUSE [Bar]]DB];\nGO\nSELECT * FROM Users;\nGO\n";
+    const script = sqlServerLeadingUseScript(sql);
+
+    expect(script).toMatchObject({ querySql: "SELECT * FROM Users", database: "Bar]DB" });
+    expect(replaceSqlServerLeadingUseQuery(sql, script!, "SELECT * FROM Users ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 100 ROWS ONLY;")).toBe("-- target\nUSE FooDB;\nGO\nUSE [Bar]]DB];\nGO\nSELECT * FROM Users ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 100 ROWS ONLY;\nGO\n");
+    expect(sqlServerUseDatabaseFromStatement('/* switch */ USE "报告库";')).toBe("报告库");
+  });
+
+  it("does not isolate ordinary SQL Server multi-statement scripts", () => {
+    expect(sqlServerLeadingUseScript("SELECT 1; SELECT 2;")).toBeUndefined();
+    expect(sqlServerLeadingUseScript("USE FooDB; INSERT INTO audit_log VALUES (1); SELECT * FROM Users;")).toBeUndefined();
+  });
+
+  it("parses the USE target of MySQL-family dialects in all three identifier forms", () => {
+    expect(useDatabaseFromStatement("USE hd_ods", "mysql")).toBe("hd_ods");
+    expect(useDatabaseFromStatement("use hd_ods;", "mysql")).toBe("hd_ods");
+    expect(useDatabaseFromStatement("  USE `hd-ods`;  ", "doris")).toBe("hd-ods");
+    expect(useDatabaseFromStatement('USE "报告库";', "starrocks")).toBe("报告库");
+    expect(useDatabaseFromStatement("-- switch\n/* c */ USE goldendb_db;", "goldendb")).toBe("goldendb_db");
+    expect(useDatabaseFromStatement("USE `a``b`;", "gbase")).toBe("a`b");
+  });
+
+  it("does not turn other statements or dialects into a database switch", () => {
+    expect(useDatabaseFromStatement("SELECT 1 FROM dual;", "mysql")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE hd_ods; SELECT 1;", "mysql")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE hd_ods;", "postgres")).toBeUndefined();
+    expect(useDatabaseFromStatement("USE other_ods;", "oracle")).toBeUndefined();
+    // SQL Server keeps its own bracket-aware parser.
+    expect(useDatabaseFromStatement("USE [Bar]]DB];", "sqlserver")).toBe("Bar]DB");
+    expect(useDatabaseFromStatement("USE hd_ods;", undefined)).toBeUndefined();
+  });
+
+  it("reports which dialects treat USE as a database switch", () => {
+    for (const databaseType of ["mysql", "doris", "starrocks", "goldendb", "gbase"] as const) {
+      expect(switchesDatabaseWithUseStatement(databaseType)).toBe(true);
+    }
+    for (const databaseType of ["postgres", "oracle", "clickhouse", "hive"] as const) {
+      expect(switchesDatabaseWithUseStatement(databaseType)).toBe(false);
+    }
+    expect(switchesDatabaseWithUseStatement(undefined)).toBe(false);
   });
 
   it("ignores commented, quoted, current, later, and non-SQL Server USE text", () => {

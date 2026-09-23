@@ -396,6 +396,7 @@ pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body:
             let _ =
                 state.app.storage.add_audit_log(&session.user_id, &session.username, "logout", None, None, true).await;
         }
+        state.app.session_credentials.clear_owner(&token);
         state.remove_session(&token).await;
     }
     let cookie = format!("dbx_session=; Path={}; HttpOnly; Max-Age=0", session_cookie_path(&state));
@@ -453,7 +454,14 @@ pub async fn auth_middleware(
             // Inject user info into request extensions
             let mut req = req;
             req.extensions_mut().insert(session);
-            return next.run(req).await;
+            // Temporary credentials of `save_password = false` connections are
+            // scoped to this signed-in session while downstream handlers run.
+            let owner = token.clone();
+            return dbx_core::session_credentials::with_credential_owner(
+                Some(owner),
+                async move { next.run(req).await },
+            )
+            .await;
         }
     }
 

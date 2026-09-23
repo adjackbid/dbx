@@ -24,7 +24,7 @@ DBX 内置以下配置预设：
 - Anthropic Compatible
 - Custom
 
-兼容或自定义配置可以设置端点、模型、API 风格、认证方式、代理和上下文窗口。API 风格包括 OpenAI 风格 completions、Responses API 和 Anthropic Messages。供应商支持时，DBX 会读取模型列表并过滤掉不适合对话/Agent 的模型。
+兼容或自定义配置可以设置端点、模型、API 风格、认证方式、代理、上下文窗口和额外 HTTP 请求头。API 风格包括 OpenAI 风格 completions、Responses API 和 Anthropic Messages。供应商支持时，DBX 会读取模型列表并过滤掉不适合对话/Agent 的模型。
 
 ### 本地 CLI Agent
 
@@ -54,7 +54,7 @@ Desktop 还可以直接调用已安装并登录的：
   <Step>
     ### 配置认证和推理参数
 
-    API 模式填写 API Key、认证方式、端点和代理。支持的模型可以选择 effort、reasoning 或 thinking；具体选项来自供应商能力，而不是对所有模型统一显示。
+    API 模式填写 API Key、认证方式、端点、代理和自定义 HTTP 请求头。请求头可用于网关认证或租户路由，例如 `X-GoModel-User-Path: /dbx-assistant`；模型发现、连接测试、对话和 Agent 请求都会携带它们。支持的模型可以选择 effort、reasoning 或 thinking；具体选项来自供应商能力，而不是对所有模型统一显示。
 
   </Step>
   <Step>
@@ -65,7 +65,7 @@ Desktop 还可以直接调用已安装并登录的：
   </Step>
 </Steps>
 
-API Key、CLI 环境变量和自定义端点可能具有敏感性。不要把设置截图、导出的配置或调试日志发送到不可信位置。
+API Key、自定义请求头的值、CLI 环境变量和自定义端点可能具有敏感性。不要把设置截图、导出的配置或调试日志发送到不可信位置。
 
 ## Ask 和 Agent
 
@@ -114,6 +114,14 @@ AI 上下文可以包含：
 
 模板会进入模型上下文，应避免放入密码、令牌或不必要的业务数据。规则冲突时，模型未必能按预期选择优先级，应保持全局指令和模板简短、明确且互不矛盾。
 
+
+## Skills（SKILL.md）
+
+Desktop 可以把只读的 [`SKILL.md`](https://developers.openai.com/codex/skills) 规则文件作为补充性指令附加到请求中。技能始终从 `~/.agents/skills` 发现；设置 → AI 中还可以额外启用一个自定义目录。两个目录独立校验，同名技能并列保留并标注来源（`默认目录` / `自定义目录`），自定义目录的技能排在前面。
+
+在输入区的 `Skills` 入口（或输入 `/skill`）选择技能，选中项以芯片形式显示在输入框上方，可随时移除。选择的生命周期是一个打开的 AI 面板：切换会话、新建会话都会保留；关闭面板或重启 DBX 即清空。选择不会持久化，DBX 也绝不写入技能文件。
+
+技能正文只在发送时从磁盘读取，并当场校验：文件被删除或不可读、frontmatter 无效、不是 UTF-8、超过单文件 1 MiB 上限、符号链接逃逸出所在目录，都会阻断发送，并在输入框上方显示横幅，标明失败的技能并提供重试、刷新、移除或打开设置等恢复操作。未选择任何技能时，提示词与既有行为逐字节一致。Web 端不提供该功能。
 ## 写入和生产安全
 
 AI Agent 的执行边界是后端强制的，不只是提示词：

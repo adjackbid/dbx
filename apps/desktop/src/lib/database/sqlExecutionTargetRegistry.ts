@@ -109,6 +109,8 @@ const SQL_EXECUTION_TARGET_REGISTRY: Partial<Record<DatabaseType, SqlExecutionTa
   // safely apply a selected index/collection/database to the actual request.
   elasticsearch: { scope: "connection" },
   easysearch: { scope: "connection" },
+  meilisearch: { scope: "connection" },
+  solr: { scope: "connection" },
   qdrant: { scope: "connection" },
   milvus: { scope: "connection" },
   weaviate: { scope: "connection" },
