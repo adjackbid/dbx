@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use axum::body::Body;
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG};
 use axum::http::{HeaderName, HeaderValue, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -21,9 +21,21 @@ use dbx_core::plugins::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::state::WebState;
+use crate::state::{UserSession, WebState};
 
 const MAX_PLUGIN_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
+
+/// Plugins are installed once for the whole instance (`<data_dir>/plugins`) and
+/// run as native processes, so install/uninstall/activation plus the trust store
+/// and marketplace sources are admin-only. Using an installed plugin (invoke,
+/// notify, filesystem, connection actions) stays available to every account.
+fn require_admin(session: &UserSession) -> Result<(), AppError> {
+    if session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("Plugins can only be managed by an administrator"))
+    }
+}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct PluginInstallQuery {
@@ -195,8 +207,10 @@ pub async fn list_plugin_repositories(
 
 pub async fn save_plugin_repository(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(repository): Json<PluginRepository>,
 ) -> Result<Json<Vec<PluginRepository>>, AppError> {
+    require_admin(&session)?;
     let marketplace =
         PluginMarketplace::new(state.app.plugins.root_dir().to_path_buf(), state.app.plugins.app_version().to_string())
             .map_err(AppError::from)?;
@@ -205,8 +219,10 @@ pub async fn save_plugin_repository(
 
 pub async fn remove_plugin_repository(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginRepositoryIdRequest>,
 ) -> Result<Json<Vec<PluginRepository>>, AppError> {
+    require_admin(&session)?;
     let marketplace =
         PluginMarketplace::new(state.app.plugins.root_dir().to_path_buf(), state.app.plugins.app_version().to_string())
             .map_err(AppError::from)?;
@@ -224,8 +240,10 @@ pub async fn fetch_plugin_marketplace_catalogs(
 
 pub async fn install_marketplace_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginMarketplaceInstallRequest>,
 ) -> Result<Json<PluginInstallResponse>, AppError> {
+    require_admin(&session)?;
     let marketplace =
         PluginMarketplace::new(state.app.plugins.root_dir().to_path_buf(), state.app.plugins.app_version().to_string())
             .map_err(AppError::from)?
@@ -239,8 +257,10 @@ pub async fn install_marketplace_plugin(
 
 pub async fn save_plugin_trusted_key(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginTrustedKeyRequest>,
 ) -> Result<Json<Vec<PluginTrustedKey>>, AppError> {
+    require_admin(&session)?;
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     tokio::task::spawn_blocking(move || {
         PluginTrustStore::save_base64_key(&root_dir, &request.key_id, &request.public_key)?;
@@ -254,8 +274,10 @@ pub async fn save_plugin_trusted_key(
 
 pub async fn remove_plugin_trusted_key(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginTrustedKeyIdRequest>,
 ) -> Result<Json<Vec<PluginTrustedKey>>, AppError> {
+    require_admin(&session)?;
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     tokio::task::spawn_blocking(move || {
         PluginTrustStore::remove_key(&root_dir, &request.key_id)?;
@@ -269,9 +291,11 @@ pub async fn remove_plugin_trusted_key(
 
 pub async fn install_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Query(query): Query<PluginInstallQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<PluginInstallResponse>, AppError> {
+    require_admin(&session)?;
     let mut package = None;
     while let Some(field) = multipart.next_field().await.map_err(|error| AppError::bad_request(error.to_string()))? {
         if field.name() != Some("file") {
@@ -310,8 +334,10 @@ pub async fn install_plugin(
 
 pub async fn rollback_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<PluginRollbackResponse>, AppError> {
+    require_admin(&session)?;
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
     let lifecycle = state.app.plugins.lifecycle();
@@ -329,8 +355,10 @@ pub async fn rollback_plugin(
 
 pub async fn uninstall_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<Vec<InstalledPluginInfo>>, AppError> {
+    require_admin(&session)?;
     // Plugins are installed once per instance, so the dependency check must see
     // every account's connections — not just the signed-in one.
     let dependent_connections = state
@@ -372,8 +400,10 @@ pub async fn uninstall_plugin(
 
 pub async fn activate_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<Vec<ActivePluginSession>>, AppError> {
+    require_admin(&session)?;
     state.app.plugin_host.activate(&request.plugin_id).await.map_err(AppError::bad_request)?;
     Ok(Json(state.app.plugin_host.list_active().await))
 }
@@ -386,8 +416,10 @@ pub async fn list_active_plugins(
 
 pub async fn stop_plugin(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&session)?;
     state.app.plugin_host.stop(&request.plugin_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

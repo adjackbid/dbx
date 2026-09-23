@@ -24,12 +24,14 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   isTauriRuntime: vi.fn(),
   refreshPluginWorkbenches: vi.fn(),
+  userStore: { isAdmin: true },
 }));
 
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/userStore", () => ({ useUserStore: () => mocks.userStore }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
 vi.mock("vue-i18n", async () => {
@@ -192,6 +194,7 @@ async function expectBusyControls() {
 beforeEach(async () => {
   vi.resetAllMocks();
   mocks.isTauriRuntime.mockReturnValue(false);
+  mocks.userStore.isAdmin = true;
   localStorage.clear();
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({}));
   vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
@@ -786,5 +789,32 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummary:{"success":1,"failed":0,"names":""}', 4000);
     expect(state.batchRunning).toBe(false);
+  });
+});
+
+describe("PluginContributionsPanel admin gating", () => {
+  it("disables plugin management for a non-admin account in Web mode", async () => {
+    mocks.userStore.isAdmin = false;
+    app.unmount();
+    host.remove();
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(PluginContributionsPanel, { onPluginRuntimeReplaced: mocks.refreshPluginWorkbenches });
+    const instance = app.mount(host) as ComponentPublicInstance & { $: { setupState: PanelState } };
+    const gated = instance.$.setupState;
+    await flushUi();
+    gated.batchMode = true;
+    gated.selectedPluginId = "a";
+    gated.selectedInstalledIds = new Set(["a"]);
+    gated.installUrl = "https://example.invalid/plugin.dbxp";
+    await nextTick();
+    for (const view of ["grid", "list"] as const) {
+      gated.marketplaceViewMode = view;
+      await nextTick();
+      for (const key of ["batchInstallUpdate", "marketplaceStatus.update", "uninstall", "rollback", "installPackage", "installFromUrl"]) {
+        expect(button(key).disabled, `${view}: ${key}`).toBe(true);
+      }
+    }
+    expect(host.textContent).toContain("settings.adminOnlySetting");
   });
 });

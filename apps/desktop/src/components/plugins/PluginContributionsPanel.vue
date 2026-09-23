@@ -36,6 +36,7 @@ import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useUserStore } from "@/stores/userStore";
 import type { InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -74,6 +75,12 @@ const { t, locale: appLocale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
+const userStore = useUserStore();
+/// Plugins are installed once per instance and run as native processes, so only
+/// the Web admin may install/uninstall/configure them. A desktop install has a
+/// single operator and keeps everything enabled; using an installed plugin stays
+/// available to every account.
+const canManagePlugins = computed(() => isTauriRuntime() || userStore.isAdmin);
 const activeSection = ref<"marketplace" | "installed" | "settings">("marketplace");
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const trustedKeys = ref<PluginTrustedKey[]>([]);
@@ -953,8 +960,8 @@ onBeforeUnmount(() => {
           <div v-if="batchMode" class="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/20 px-3 py-2 text-xs">
             <span class="font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedListings.length }) }}</span>
             <div class="ml-auto flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
-              <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
+              <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning || !canManagePlugins" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
+              <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning || !canManagePlugins" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
               <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
             </div>
           </div>
@@ -1044,7 +1051,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
                   :class="marketplaceActionClass(listing)"
-                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning || !canManagePlugins"
                   @click="installMarketplaceListing(listing)"
                 >
                   <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -1111,7 +1118,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
                 :class="marketplaceActionClass(listing)"
-                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning || !canManagePlugins"
                 @click="installMarketplaceListing(listing)"
               >
                 <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -1135,7 +1142,7 @@ onBeforeUnmount(() => {
             <Button variant="outline" size="sm" class="h-8 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
             <template v-if="batchMode">
               <span class="text-xs font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedInstalled.length }) }}</span>
-              <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning" @click="runBatchUninstall">
+              <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning || !canManagePlugins" @click="runBatchUninstall">
                 <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" /><Trash2 class="size-3.5" />{{ t("pluginPlatform.batchUninstall") }}
               </Button>
               <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
@@ -1175,7 +1182,7 @@ onBeforeUnmount(() => {
               <p class="text-xs text-muted-foreground">{{ t("pluginPlatform.installedUpdatesAvailableDescription") }}</p>
             </div>
             <div class="ml-auto flex shrink-0 items-center gap-2">
-              <Button size="sm" class="h-7 text-xs" :disabled="mutationRunning" @click="runUpdateAllInstalled">
+              <Button size="sm" class="h-7 text-xs" :disabled="mutationRunning || !canManagePlugins" @click="runUpdateAllInstalled">
                 <Loader2 v-if="installedUpdateProgress" class="size-3 animate-spin" />
                 <Download v-else class="size-3" />
                 {{ installedUpdateProgress ? t("pluginPlatform.updatingProgress", installedUpdateProgress) : t("pluginPlatform.updateAll") }}
@@ -1287,12 +1294,12 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="flex flex-col items-end gap-1.5">
                     <div class="flex gap-2">
-                      <Button v-if="selectedUpdateEntry" size="sm" class="gap-1.5" :disabled="mutationRunning" @click="updateInstalledPlugin(selectedUpdateEntry.listing.plugin.id)">
+                      <Button v-if="selectedUpdateEntry" size="sm" class="gap-1.5" :disabled="mutationRunning || !canManagePlugins" @click="updateInstalledPlugin(selectedUpdateEntry.listing.plugin.id)">
                         <Loader2 v-if="marketplaceInstallingKey === selectedUpdateEntry.listing.key" class="size-3.5 animate-spin" />
                         <Download v-else class="size-3.5" />{{ t("pluginPlatform.updateToVersion", { version: selectedUpdateEntry.listing.plugin.latestVersion }) }}
                       </Button>
-                      <Button size="sm" variant="outline" class="gap-1.5" :disabled="mutationRunning" @click="rollbackSelectedPlugin"><RotateCcw class="size-3.5" />{{ t("pluginPlatform.rollback") }}</Button>
-                      <Button size="sm" variant="outline" class="gap-1.5 text-destructive" :disabled="mutationRunning" @click="uninstallSelectedPlugin"><Trash2 class="size-3.5" />{{ t("pluginPlatform.uninstall") }}</Button>
+                      <Button size="sm" variant="outline" class="gap-1.5" :disabled="mutationRunning || !canManagePlugins" @click="rollbackSelectedPlugin"><RotateCcw class="size-3.5" />{{ t("pluginPlatform.rollback") }}</Button>
+                      <Button size="sm" variant="outline" class="gap-1.5 text-destructive" :disabled="mutationRunning || !canManagePlugins" @click="uninstallSelectedPlugin"><Trash2 class="size-3.5" />{{ t("pluginPlatform.uninstall") }}</Button>
                     </div>
                     <span v-if="selectedUpdateEntry" class="text-[11px] text-muted-foreground"
                       >{{ t("pluginPlatform.installedVersionUpdatable", { installed: selectedDefinition?.plugin.manifest.version || "0.0.0", latest: selectedUpdateEntry.listing.plugin.latestVersion }) }} · {{ selectedUpdateEntry.repositoryName }}</span
@@ -1359,6 +1366,7 @@ onBeforeUnmount(() => {
 
       <TabsContent value="settings" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <div class="space-y-4 pb-2">
+          <div v-if="!canManagePlugins" class="rounded-xl border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">{{ t("settings.adminOnlySetting") }}</div>
           <section class="space-y-3 rounded-xl border p-4">
             <div class="flex items-start gap-3">
               <div class="rounded-md bg-primary/10 p-2 text-primary"><FileUp class="size-4" /></div>
@@ -1368,16 +1376,18 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-3">
-              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !canManagePlugins" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />{{ t("pluginPlatform.signedPackagesVerifiedAutomatically") }}</div>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileUp class="size-3.5" />{{ t("pluginPlatform.dropInstallHint") }}</div>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <div class="relative min-w-0 flex-1 sm:max-w-md">
                 <Link2 class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
-                <Input v-model="installUrl" class="h-8 pl-8 font-mono text-xs" type="url" :disabled="urlInstalling" :placeholder="t('pluginPlatform.installUrlPlaceholder')" @keyup.enter="installPluginFromUrl" />
+                <Input v-model="installUrl" class="h-8 pl-8 font-mono text-xs" type="url" :disabled="urlInstalling || !canManagePlugins" :placeholder="t('pluginPlatform.installUrlPlaceholder')" @keyup.enter="installPluginFromUrl" />
               </div>
-              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !installUrl.trim()" @click="installPluginFromUrl"><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !installUrl.trim() || !canManagePlugins" @click="installPluginFromUrl"
+                ><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button
+              >
             </div>
             <div v-if="urlInstalling" class="space-y-1.5">
               <div class="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -1405,15 +1415,15 @@ onBeforeUnmount(() => {
                   <div class="mt-1 truncate font-mono text-[10px] text-muted-foreground">{{ repository.catalogUrl || t("pluginPlatform.repositoryNotConfigured") }}</div>
                 </div>
                 <Badge :variant="repository.enabled ? 'secondary' : 'outline'" class="h-5 px-1.5 text-[10px]">{{ repository.enabled ? t("pluginPlatform.enabled") : t("pluginPlatform.disabled") }}</Badge>
-                <Button v-if="!repository.managed" size="sm" variant="ghost" class="h-7" :disabled="mutationRunning" @click="toggleRepository(repository)">{{ repository.enabled ? t("pluginPlatform.disable") : t("pluginPlatform.enable") }}</Button>
-                <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
+                <Button v-if="!repository.managed" size="sm" variant="ghost" class="h-7" :disabled="mutationRunning || !canManagePlugins" @click="toggleRepository(repository)">{{ repository.enabled ? t("pluginPlatform.disable") : t("pluginPlatform.enable") }}</Button>
+                <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning || !canManagePlugins" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
               </div>
             </div>
             <div class="grid gap-2 lg:grid-cols-[180px_220px_minmax(260px,1fr)_auto]">
-              <Input v-model="repositoryId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryIdPlaceholder')" />
-              <Input v-model="repositoryName" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryNamePlaceholder')" />
-              <Input v-model="repositoryCatalogUrl" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryCatalogUrlPlaceholder')" />
-              <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveRepository"><Plus class="size-3.5" />{{ t("pluginPlatform.addRepository") }}</Button>
+              <Input v-model="repositoryId" class="h-8 text-xs" :disabled="!canManagePlugins" :placeholder="t('pluginPlatform.repositoryIdPlaceholder')" />
+              <Input v-model="repositoryName" class="h-8 text-xs" :disabled="!canManagePlugins" :placeholder="t('pluginPlatform.repositoryNamePlaceholder')" />
+              <Input v-model="repositoryCatalogUrl" class="h-8 text-xs" :disabled="!canManagePlugins" :placeholder="t('pluginPlatform.repositoryCatalogUrlPlaceholder')" />
+              <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !canManagePlugins" @click="saveRepository"><Plus class="size-3.5" />{{ t("pluginPlatform.addRepository") }}</Button>
             </div>
           </section>
 
@@ -1445,7 +1455,7 @@ onBeforeUnmount(() => {
                   <Label for="allow-unsigned-plugin-package" class="text-xs font-medium">{{ t("pluginPlatform.allowUnsignedDevelopmentPackage") }}</Label>
                   <div class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t("pluginPlatform.allowUnsignedDevelopmentPackageDescription") }}</div>
                 </div>
-                <Switch id="allow-unsigned-plugin-package" v-model="allowUnsigned" size="sm" class="mt-0.5 shrink-0" />
+                <Switch id="allow-unsigned-plugin-package" v-model="allowUnsigned" size="sm" class="mt-0.5 shrink-0" :disabled="!canManagePlugins" />
               </div>
 
               <template v-if="showCustomRepositoryTrustSettings">
@@ -1459,13 +1469,13 @@ onBeforeUnmount(() => {
                       <div class="text-xs font-medium">{{ key.keyId }}</div>
                       <div class="truncate font-mono text-[10px] text-muted-foreground" :title="key.publicKey">{{ abbreviatedPublicKey(key.publicKey) }}</div>
                     </div>
-                    <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
+                    <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning || !canManagePlugins" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
                   </div>
                 </div>
                 <div class="grid gap-2 md:grid-cols-[180px_minmax(260px,1fr)_auto]">
-                  <Input v-model="trustedKeyId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryKeyIdPlaceholder')" />
-                  <Input v-model="trustedPublicKey" class="h-8 font-mono text-xs" :placeholder="t('pluginPlatform.repositoryPublicKeyPlaceholder')" />
-                  <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>
+                  <Input v-model="trustedKeyId" class="h-8 text-xs" :disabled="!canManagePlugins" :placeholder="t('pluginPlatform.repositoryKeyIdPlaceholder')" />
+                  <Input v-model="trustedPublicKey" class="h-8 font-mono text-xs" :disabled="!canManagePlugins" :placeholder="t('pluginPlatform.repositoryPublicKeyPlaceholder')" />
+                  <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !canManagePlugins" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>
                 </div>
               </template>
             </div>
