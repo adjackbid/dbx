@@ -120,9 +120,9 @@ DBX reports its version on the sign-in screen and from `GET /api/version`, and e
 git revision plus the build time, so a running deployment can be told apart from another build of the
 same release.
 
-- Bump the patch version in **all four manifests** whenever a change affects shipped, user-visible
-  behavior (`0.6.19` → `0.6.20`): `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
-  `crates/dbx-web/Cargo.toml`.
+- Bump the patch version in **all five manifests** whenever a change affects shipped, user-visible
+  behavior (`0.6.20` → `0.6.21`): `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
+  `crates/dbx-web/Cargo.toml`, `flake.nix`.
 - Update the two matching `version` entries in `Cargo.lock` (`dbx` and `dbx-web`); Docker builds do not
   refresh the lock file.
 - `crates/dbx-web/build.rs` writes `DBX_BUILD_COMMIT` and `DBX_BUILD_TIME` into the binary. Docker
