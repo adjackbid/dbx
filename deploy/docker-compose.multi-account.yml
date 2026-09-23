@@ -37,6 +37,13 @@ services:
       # - DBX_PASSWORD=YourAdminPassword
       - DBX_DATA_DIR=/app/data
       - DBX_PORT=4230
+      # Request log level. `tower_http=debug` writes one line per request
+      # (method + URI). Without it a failing request only shows up as
+      # `tower_http::trace::on_failure: response failed classification=Status
+      # code: 500`, which carries no path — that is why this instance defaults
+      # to debug. Use `tower_http=warn` to quiet it back down, or
+      # `- RUST_LOG=dbx_web=debug,tower_http=debug` for full handler detail.
+      - RUST_LOG=${RUST_LOG:-dbx_web=info,tower_http=debug}
       # Uncomment when publishing DBX under a reverse-proxy subpath:
       # - DBX_PUBLIC_BASE_PATH=/dbx
     volumes:

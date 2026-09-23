@@ -373,6 +373,30 @@ docker exec dbx-multi-account sh -c "/app/data/agents/drivers/oracle/agent < /tm
 若 `client_identifier` 是空的，代表容器裡跑的還是舊 agent（`docker exec dbx-multi-account ls -l /app/data/agents/drivers/oracle/` 看日期）。
 要還原官方版：把上面備份的檔案 `docker cp` 回同一個路徑再重啟即可。
 
+### 10.5 記錄每個請求（診斷「沒有路徑的 500」）
+
+`crates/dbx-web/src/main.rs` 用 `EnvFilter::try_from_default_env()`，預設是 `dbx_web=info,tower_http=info`。
+`tower_http` 只在 **debug** 才會逐筆記錄請求，所以預設情況下一個 500 只會留下：
+
+```
+tower_http::trace::on_failure: response failed classification=Status code: 500 Internal Server Error latency=0 ms
+```
+
+**沒有路徑、也沒有方法**（`AppError` 的 500 不會另外寫 log）。要看路徑就把層級打開：
+
+```yaml
+# deploy/docker-compose.multi-account.yml（此實例已預設開啟，可用環境變數覆寫）
+- RUST_LOG=${RUST_LOG:-dbx_web=info,tower_http=debug}
+```
+
+```bat
+REM 只改環境變數、不改程式碼 → 不需要 --build，容器會快速 recreate
+docker compose -f deploy/docker-compose.multi-account.yml up -d
+docker compose -f deploy/docker-compose.multi-account.yml logs -f dbx-multi-account
+```
+
+要更細就 `- RUST_LOG=dbx_web=debug,tower_http=debug`；嫌吵就 `tower_http=warn`。
+
 ---
 
 ## 11. 主要程式碼位置

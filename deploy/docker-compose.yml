@@ -18,6 +18,10 @@ services:
       # - DBX_WEB_MCP_ALLOWED_ORIGINS=https://mcp-client.example.com
       # Uncomment when publishing DBX under a reverse-proxy subpath, e.g. https://example.com/dbx/
       # - DBX_PUBLIC_BASE_PATH=/dbx
+      # Request log level (defaults to the binary's `dbx_web=info,tower_http=info`).
+      # `tower_http=debug` adds one line per request with method + URI, which is
+      # what identifies a request that only surfaces as a bare 500 in the logs.
+      # - RUST_LOG=dbx_web=info,tower_http=debug
     volumes:
       - dbx-data:/app/data
     restart: unless-stopped
