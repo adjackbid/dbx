@@ -1,14 +1,14 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use dbx_core::docs::{CollectOptions, SchemaSnapshot};
 use dbx_core::models::connection::ConnectionConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::state::WebState;
+use crate::state::{UserSession, WebState};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,11 +23,17 @@ pub struct DocsSnapshotRequest {
     pub project_name: Option<String>,
 }
 
-async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<ConnectionConfig, AppError> {
+/// Connections are scoped to the signed-in account: a connection id belonging to
+/// another account must resolve to "not found" instead of leaking its schema.
+async fn load_connection(
+    state: &Arc<WebState>,
+    user_id: &str,
+    connection_id: &str,
+) -> Result<ConnectionConfig, AppError> {
     state
         .app
         .storage
-        .load_all_connections()
+        .load_connections(user_id)
         .await
         .map_err(AppError::from)?
         .into_iter()
@@ -37,9 +43,10 @@ async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<C
 
 pub async fn collect_snapshot(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<DocsSnapshotRequest>,
 ) -> Result<Json<SchemaSnapshot>, AppError> {
-    let connection = load_connection(&state, &request.connection_id).await?;
+    let connection = load_connection(&state, &session.user_id, &request.connection_id).await?;
 
     let options = CollectOptions {
         database: request.database.clone(),
@@ -86,18 +93,20 @@ fn notes_path_for(state: &Arc<WebState>, config: &ConnectionConfig) -> std::path
 
 pub async fn load_annotations(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<DocsAnnotationsRequest>,
 ) -> Result<Json<Option<dbx_core::docs::annotations::AnnotationFile>>, AppError> {
-    let config = load_connection(&state, &request.connection_id).await?;
+    let config = load_connection(&state, &session.user_id, &request.connection_id).await?;
     let path = notes_path_for(&state, &config);
     Ok(Json(dbx_core::docs::annotations::load_annotations(&path).map_err(AppError::from)?))
 }
 
 pub async fn apply_annotations(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<DocsApplyRequest>,
 ) -> Result<Json<SchemaSnapshot>, AppError> {
-    let config = load_connection(&state, &request.connection_id).await?;
+    let config = load_connection(&state, &session.user_id, &request.connection_id).await?;
     let mut applied = request.snapshot;
     dbx_core::docs::annotations::apply_annotations(&mut applied, &request.annotations, config.db_type);
     Ok(Json(applied))
@@ -105,9 +114,10 @@ pub async fn apply_annotations(
 
 pub async fn save_annotations(
     State(state): State<Arc<WebState>>,
+    Extension(session): Extension<UserSession>,
     Json(request): Json<DocsSaveRequest>,
 ) -> Result<Json<()>, AppError> {
-    let config = load_connection(&state, &request.connection_id).await?;
+    let config = load_connection(&state, &session.user_id, &request.connection_id).await?;
     let path = notes_path_for(&state, &config);
     dbx_core::docs::annotations::save_annotations(&path, &request.annotations).map_err(AppError::from)?;
     Ok(Json(()))
@@ -134,4 +144,46 @@ pub async fn export_html(Json(request): Json<DocsExportRequest>) -> Result<Json<
     let content = dbx_core::docs::to_standalone_html(&request.snapshot, &request.annotations, &request.lang)
         .map_err(AppError::from)?;
     Ok(Json(DocsExportResponse { content }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbx_core::connection::AppState;
+    use dbx_core::storage::Storage;
+    use serde_json::json;
+
+    async fn state_with_connection(user_id: &str, connection_id: &str) -> (Arc<WebState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-docs-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": connection_id,
+            "name": "docs scope",
+            "db_type": "sqlite",
+            "host": dir.join("query.db").to_str().unwrap(),
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": "main",
+            "save_password": false
+        }))
+        .unwrap();
+        storage.save_connections(std::slice::from_ref(&config), user_id).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        (Arc::new(WebState::for_tests(app, dir.clone())), dir)
+    }
+
+    #[tokio::test]
+    async fn connection_lookup_is_scoped_to_the_signed_in_account() {
+        let (state, dir) = state_with_connection("user-a", "scoped-connection").await;
+
+        let owned = load_connection(&state, "user-a", "scoped-connection").await.unwrap();
+        assert_eq!(owned.id, "scoped-connection");
+
+        let other = load_connection(&state, "user-b", "scoped-connection").await;
+        assert!(other.is_err(), "another account must not resolve this connection id");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
